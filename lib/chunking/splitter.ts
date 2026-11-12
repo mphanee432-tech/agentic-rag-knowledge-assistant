@@ -32,7 +32,7 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
 }
 
-function parseBlocks(markdown: string): MarkdownBlock[] {
+function parseBlocks(markdown: string, maxChars: number): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   const blocks: MarkdownBlock[] = []
   let i = 0
@@ -113,9 +113,18 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
       paragraphLines.push(lines[i])
       i++
     }
+    let content = paragraphLines.join("\n")
+    while (content.length > maxChars) {
+      const whitespace = content.slice(0, maxChars + 1).search(/\s+\S*$/)
+      let end = whitespace > 0 ? whitespace : maxChars
+      // Keep surrogate pairs intact when a long token has no whitespace.
+      if (/[\uD800-\uDBFF]/.test(content[end - 1])) end--
+      blocks.push({ type: "paragraph", content: content.slice(0, end) })
+      content = content.slice(end).trimStart()
+    }
     blocks.push({
       type: "paragraph",
-      content: paragraphLines.join("\n"),
+      content,
     })
   }
 
@@ -145,7 +154,7 @@ export function splitMarkdown(
   const minTokens = options?.minTokens ?? 300 // ~1200 chars
   const maxTokens = options?.maxTokens ?? 800 // ~3200 chars
 
-  const blocks = parseBlocks(markdown)
+  const blocks = parseBlocks(markdown, Math.max(2, Math.floor(maxTokens * 4)))
   if (blocks.length === 0) return []
 
   const chunks: DocumentChunk[] = []

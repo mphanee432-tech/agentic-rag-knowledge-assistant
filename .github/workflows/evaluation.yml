@@ -1,0 +1,71 @@
+name: Staging evaluation
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Evaluation mode
+        type: choice
+        options: [smoke, release]
+        default: smoke
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-evaluation
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: Staging evaluation
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    environment: staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements-eval.txt
+      - run: python -m pip install -r scripts/requirements-eval.txt
+      - name: Evaluate staging
+        shell: bash
+        env:
+          EVAL_MODE: ${{ inputs.mode }}
+          EVAL_API_URL: ${{ vars.EVAL_API_URL }}
+          EVAL_PROJECT_ID: ${{ vars.EVAL_PROJECT_ID }}
+          EVAL_OTHER_PROJECT_ID: ${{ vars.EVAL_OTHER_PROJECT_ID }}
+          EVAL_ACCESS_TOKEN: ${{ secrets.EVAL_ACCESS_TOKEN }}
+          EVAL_OTHER_ACCESS_TOKEN: ${{ secrets.EVAL_OTHER_ACCESS_TOKEN }}
+          EVAL_GEMINI_API_KEY: ${{ secrets.EVAL_GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/evaluation
+          {
+            : "${EVAL_API_URL:?Configure the staging EVAL_API_URL variable}"
+            : "${EVAL_PROJECT_ID:?Configure the staging EVAL_PROJECT_ID variable}"
+            : "${EVAL_ACCESS_TOKEN:?Configure the staging EVAL_ACCESS_TOKEN secret}"
+            case "$EVAL_MODE" in
+              smoke) pnpm run eval:py:smoke --output-dir artifacts/evaluation ;;
+              release) pnpm run eval:release --output-dir artifacts/evaluation ;;
+              *) echo 'Unsupported evaluation mode'; exit 1 ;;
+            esac
+          } 2>&1 | tee artifacts/evaluation/run.log
+      - name: Preserve evaluation results, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/evaluation/
+          if-no-files-found: warn
+          retention-days: 7

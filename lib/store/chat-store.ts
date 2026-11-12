@@ -2,6 +2,7 @@ import { create } from "zustand"
 
 export interface Citation {
   id: string
+  index?: number
   content: string
   metadata?: {
     is_tabular?: boolean
@@ -28,6 +29,7 @@ export interface DocumentItem {
   project_id: string
   storage_path: string
   status: "pending_upload" | "uploaded" | "processing" | "indexed" | "failed"
+  last_ingestion_error?: string | null
   created_at: string
   metadata?: Record<string, unknown>
 }
@@ -67,6 +69,7 @@ export const useChatStore = create<ChatStore>((set) => ({
   setActiveProject: (projectId: string) =>
     set({
       activeProjectId: projectId,
+      isLoading: false,
       messages: [],
       statusMessage: null,
       documents: [],

@@ -3,4 +3,5 @@ allowBuilds:
   esbuild: true
   protobufjs: true
   sharp: false
+  supabase: true
   unrs-resolver: false

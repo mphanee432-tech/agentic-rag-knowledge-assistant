@@ -2,8 +2,11 @@
 
 import * as React from "react"
 import { useState } from "react"
+import Markdown, { type Components } from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { Bot, User, Check, Copy, AlertCircle, FileText } from "lucide-react"
 import { CitationBadge } from "@/components/chat/citation-badge"
+import { splitCitations } from "@/lib/citations"
 import { MessageActions } from "@/components/chat/message-actions"
 import type { ChatMessage, Citation } from "@/lib/store/chat-store"
 
@@ -12,18 +15,12 @@ interface MessageItemProps {
   isStreaming?: boolean
 }
 
-const REFUSAL_PREFIX = "I couldn't find enough evidence in this project's uploaded documents"
+const REFUSAL_PREFIX = "I couldn't find evidence in this project's documents"
 
 export function MessageItem({ message, isStreaming = false }: MessageItemProps) {
   const isUser = message.role === "user"
   const isRefusal = message.content.includes(REFUSAL_PREFIX)
   const citations = message.citations || []
-
-  // Map chunk IDs to citation objects for inline replacement
-  const citationMap = new Map<string, Citation>()
-  citations.forEach((c) => {
-    citationMap.set(c.id, c)
-  })
 
   return (
     <div
@@ -38,7 +35,7 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
       )}
 
       <div
-        className={`flex flex-col max-w-[85%] md:max-w-[75%] gap-2 ${
+        className={`flex min-w-0 flex-col max-w-[85%] md:max-w-[75%] gap-2 ${
           isUser
             ? "items-end"
             : "items-start"
@@ -65,7 +62,6 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
             <FormattedContent
               content={message.content}
               citations={citations}
-              citationMap={citationMap}
             />
           </div>
 
@@ -104,58 +100,72 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
 function FormattedContent({
   content,
   citations,
-  citationMap,
 }: {
   content: string
   citations: Citation[]
-  citationMap: Map<string, Citation>
 }) {
-  // Regex parsing for code blocks and inline citations
-  // Match markdown code blocks: ```lang\ncode\n```
-  const parts = content.split(/(```[\s\S]*?```)/g)
-
-  return (
-    <>
-      {parts.map((part, index) => {
-        if (part.startsWith("```") && part.endsWith("```")) {
-          const lines = part.slice(3, -3).trim().split("\n")
-          const language = lines[0].trim()
-          const code = (lines.length > 1 ? lines.slice(1).join("\n") : lines[0]).trim()
-
-          return <CodeBlock key={index} code={code} language={language} />
+  const components = React.useMemo<Components>(() => ({
+      span({ node, children }) {
+        const indices = node?.properties.dataCitationIndices
+        if (!Array.isArray(indices)) return <span>{children}</span>
+        return <>{indices.map((value, position) => {
+          const index = Number(value)
+          const citation = citations.find(c => c.index === index && c.id.trim().length > 0)
+          return citation ? <CitationBadge key={position} citation={citation} index={index - 1} /> : <span key={position}>[Unverified citation {index}]</span>
+        })}</>
+      },
+      p: ({ children }) => <p className="my-2 whitespace-pre-wrap first:mt-0 last:mb-0">{children}</p>,
+      h1: ({ children }) => <h2 className="mb-2 mt-4 text-lg font-semibold">{children}</h2>,
+      h2: ({ children }) => <h3 className="mb-2 mt-4 text-base font-semibold">{children}</h3>,
+      h3: ({ children }) => <h4 className="mb-1 mt-3 font-semibold">{children}</h4>,
+      ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
+      ol: ({ children, start }) => <ol start={start} className="my-2 list-decimal space-y-1 pl-5">{children}</ol>,
+      blockquote: ({ children }) => <blockquote className="my-2 border-l-2 border-zinc-300 pl-3 dark:border-zinc-600">{children}</blockquote>,
+      a: ({ children, href }) => <a href={href} className="text-primary underline underline-offset-2">{children}</a>,
+      img: ({ alt }) => <span>{alt || "[Image]"}</span>,
+      code: ({ children, className }) => <code className={`rounded bg-zinc-100 px-1 font-mono text-[0.9em] dark:bg-zinc-800 ${className || ""}`}>{children}</code>,
+      pre({ children }) {
+        const code = React.Children.toArray(children)[0]
+        if (!React.isValidElement<{ children?: React.ReactNode; className?: string }>(code) || typeof code.props.children !== "string") {
+          return <pre>{children}</pre>
         }
-
-        // Parse inline citations in text: [Doc Chunk: <id>]
-        const subParts = part.split(/(\[Doc Chunk:\s*[^\]]+\])/gi)
-
-        return (
-          <span key={index} className="whitespace-pre-wrap">
-            {subParts.map((sub, sIdx) => {
-              const match = sub.match(/\[Doc Chunk:\s*([^\]]+)\]/i)
-              if (match) {
-                const chunkId = match[1].trim()
-                const foundCitation =
-                  citationMap.get(chunkId) ||
-                  citations.find((c) => c.id.includes(chunkId)) || {
-                    id: chunkId,
-                    content: `Verified chunk ${chunkId}`,
-                    metadata: {},
-                  }
-
-                return (
-                  <CitationBadge
-                    key={sIdx}
-                    citation={foundCitation}
-                  />
-                )
-              }
-              return sub
-            })}
-          </span>
-        )
-      })}
-    </>
+        return <CodeBlock code={code.props.children.replace(/\n$/, "")} language={code.props.className?.replace(/^language-/, "")} />
+      },
+      table: ({ children }) => <div role="region" aria-label="Answer table" tabIndex={0} className="my-3 max-w-full overflow-x-auto rounded-lg border border-zinc-200 focus-visible:outline-2 focus-visible:outline-primary dark:border-zinc-700">
+        <table className="w-full border-collapse text-left text-sm">{children}</table>
+      </div>,
+      thead: ({ children }) => <thead className="bg-zinc-100 dark:bg-zinc-800">{children}</thead>,
+      th: ({ children, style }) => <th scope="col" style={style} className="border-b border-zinc-200 px-3 py-2 font-semibold dark:border-zinc-700">{children}</th>,
+      td: ({ children, style }) => <td style={style} className="border-b border-zinc-200 px-3 py-2 align-top dark:border-zinc-700">{children}</td>,
+    }), [citations])
+  return (
+    <Markdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeCitations]} skipHtml components={components}>{content}</Markdown>
   )
+}
+
+interface MarkdownNode {
+  type: string
+  tagName?: string
+  value?: string
+  properties?: Record<string, unknown>
+  children?: MarkdownNode[]
+}
+
+function rehypeCitations() {
+  return function transform(node: MarkdownNode) {
+    // Literal code and link labels must not gain nested interactive buttons.
+    if (!node.children || ["pre", "code", "a"].includes(node.tagName || "")) return
+    node.children = node.children.flatMap(child => {
+      if (child.type === "text" && child.value) {
+        return splitCitations(child.value).map(part => part.indices ? {
+          type: "element", tagName: "span", properties: { dataCitationIndices: part.indices },
+          children: [{ type: "text", value: part.text }],
+        } : { ...child, value: part.text })
+      }
+      transform(child)
+      return [child]
+    })
+  }
 }
 
 function CodeBlock({ code, language }: { code: string; language?: string }) {

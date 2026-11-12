@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { useState, useEffect } from "react"
+import { useShallow } from "zustand/react/shallow"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import {
@@ -14,6 +15,7 @@ import {
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { useChatStore, type DocumentItem } from "@/lib/store/chat-store"
+import { loadWorkspace, watchWorkspace } from "@/lib/load-workspace"
 import { DocumentUploader } from "@/components/upload/document-uploader"
 
 interface SidebarProps {
@@ -28,12 +30,15 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
     activeProjectId,
     setActiveProject,
     documents,
-    setDocuments,
-    setSuggestedQueries,
-  } = useChatStore()
+  } = useChatStore(useShallow(state => ({
+    activeProjectId: state.activeProjectId,
+    setActiveProject: state.setActiveProject,
+    documents: state.documents,
+  })))
 
   const effectiveProjectId = projectId || activeProjectId
 
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [projects, setProjects] = useState<Array<{ id: string; name?: string; created_at: string }>>([])
 
   // Sync route projectId into store
@@ -43,58 +48,29 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
     }
   }, [projectId, activeProjectId, setActiveProject])
 
-  // Fetch projects on mount for workspace switcher
   useEffect(() => {
-    fetchProjects()
+    const controller = new AbortController()
+    fetch("/api/projects", { signal: controller.signal })
+      .then(res => { if (!res.ok) throw new Error("Unable to load projects."); return res.json() })
+      .then(data => { if (!controller.signal.aborted) setProjects(data.projects || []) })
+      .catch(error => { if (!controller.signal.aborted) console.error(error) })
+    return () => controller.abort()
   }, [])
-
-  // Fetch documents when effectiveProjectId changes
   useEffect(() => {
-    if (effectiveProjectId) {
-      fetchDocuments(effectiveProjectId)
-    }
+    if (effectiveProjectId) return watchWorkspace(effectiveProjectId)
   }, [effectiveProjectId])
-
-  const fetchProjects = async () => {
-    try {
-      const res = await fetch("/api/projects")
-      const data = await res.json()
-      if (data.projects && data.projects.length > 0) {
-        setProjects(data.projects)
-      }
-    } catch (err) {
-      console.error("Failed to fetch projects:", err)
-    }
-  }
-
-  const fetchDocuments = async (projId: string) => {
-    try {
-      const [docRes, projRes] = await Promise.all([
-        fetch(`/api/documents?projectId=${projId}`),
-        fetch(`/api/projects?id=${projId}`),
-      ])
-      const docData = await docRes.json()
-      if (docData.documents) {
-        setDocuments(docData.documents)
-      }
-      const projData = await projRes.json()
-      if (projData.project?.suggested_queries && Array.isArray(projData.project.suggested_queries)) {
-        setSuggestedQueries(projData.project.suggested_queries)
-      }
-    } catch (err) {
-      console.error("Failed to fetch documents or project details:", err)
-    }
-  }
 
   const handleDeleteDocument = async (documentId: string) => {
     if (!effectiveProjectId) return
+    setDeleteError(null)
     try {
-      await fetch(`/api/documents?documentId=${documentId}`, {
+      const response = await fetch(`/api/documents?documentId=${documentId}`, {
         method: "DELETE",
       })
-      await fetchDocuments(effectiveProjectId)
+      if (!response.ok) throw new Error((await response.json()).error || "Unable to delete document.")
+      await loadWorkspace(effectiveProjectId)
     } catch (err) {
-      console.error("Failed to delete document:", err)
+      setDeleteError(err instanceof Error ? err.message : "Unable to delete document.")
     }
   }
 
@@ -135,7 +111,6 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
             value={effectiveProjectId || ""}
             onChange={(e) => {
               if (e.target.value) {
-                setActiveProject(e.target.value)
                 router.push(`/project/${e.target.value}`)
               }
             }}
@@ -174,6 +149,7 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
         </div>
       </div>
 
+      {deleteError && <p role="alert" className="p-3 text-xs text-red-600">{deleteError}</p>}
       {/* Indexed Document List */}
       <div className="flex-1 overflow-y-auto p-3">
         <div className="flex items-center justify-between text-[11px] font-semibold text-zinc-500 uppercase tracking-wider mb-2 px-1">
@@ -235,7 +211,7 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
           currentDocCount={activeDocCount}
           onUploadSuccess={() => {
             if (effectiveProjectId) {
-              fetchDocuments(effectiveProjectId)
+              void loadWorkspace(effectiveProjectId)
             }
           }}
         />

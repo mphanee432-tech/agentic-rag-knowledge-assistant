@@ -1,0 +1,57 @@
+import { validCitations } from "./citations"
+export { citationIndices, validCitations } from "./citations"
+
+export const NO_EVIDENCE = "I don't know."
+export const MAX_ANSWER_CHARS = 3000
+export interface StreamCitation {
+  id: string
+  index: number
+  content: string
+  metadata?: Record<string, unknown>
+}
+export type ChatEvent =
+  | { type: "metadata"; interactionId?: string; citations: StreamCitation[] }
+  | { type: "text"; text: string }
+  | { type: "finish"; metrics: Record<string, unknown>; context?: string }
+  | { type: "error"; message: string }
+
+export function encodeEvent(event: ChatEvent): Uint8Array {
+  return new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+// Both chat entry points use the same parser. Metadata never enters answer text.
+export async function readChatStream(response: Response, onEvent: (event: ChatEvent) => void) {
+  if (!response.headers.get("content-type")?.includes("text/event-stream")) throw new Error("Unsupported chat response.")
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error("Response body is not readable.")
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let finished = false
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true })
+      let boundary: number
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const frame = buffer.slice(0, boundary)
+        buffer = buffer.slice(boundary + 2)
+        if (!frame.startsWith("data: ")) continue
+        if (finished) throw new Error("The answer stream continued after completion.")
+        const event = JSON.parse(frame.slice(6)) as ChatEvent
+        if (event.type === "error") throw new Error(event.message)
+        if (event.type === "finish") finished = true
+        onEvent(event)
+      }
+      if (done) break
+    }
+    if (!finished || buffer.trim()) throw new Error("The answer stream ended unexpectedly. Please retry.")
+  } finally { reader.releaseLock() }
+}
+export function assertValidAnswer(text: string, citations: StreamCitation[], finishReason: string) {
+  if (finishReason !== "stop") throw new Error("Generation did not complete.")
+  if (!text.trim() || text.length > MAX_ANSWER_CHARS) throw new Error("Answer is empty or exceeds the length limit.")
+  if (text.trim() !== NO_EVIDENCE && !validCitations(text, citations)) {
+    throw new Error("Answer contains missing or invalid citations.")
+  }
+}
+

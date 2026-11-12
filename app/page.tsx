@@ -1,13 +1,13 @@
 import {
-  Layers,
   FolderPlus,
   ShieldCheck,
   Database,
 } from "lucide-react"
 import { createServerClient } from "@/lib/supabase/server"
-import { createAdminClient } from "@/lib/supabase/admin"
+import { redirect } from "next/navigation"
+import Link from "next/link"
+import { signOut } from "@/app/actions/auth"
 import { ThemeToggle } from "@/components/theme-toggle"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { CreateProjectDialog } from "@/components/dashboard/create-project-dialog"
 import { ProjectCard, type ProjectCardData } from "@/components/dashboard/project-card"
@@ -26,42 +26,15 @@ export default async function DashboardPage() {
     data: { user },
   } = await supabase.auth.getUser()
 
-  let rawProjects: RawProjectRecord[] = []
-
-  if (user) {
-    // SELECT id, name, user_id, created_at, documents(count) WHERE user_id = auth.uid()
-    const { data } = await supabase
-      .from("projects")
-      .select("id, name, user_id, created_at, documents(count)")
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
-    rawProjects = (data as unknown as RawProjectRecord[]) || []
-  } else {
-    // Graceful fallback for local development or demo sessions without active auth cookies
-    const { data } = await supabase
-      .from("projects")
-      .select("id, name, user_id, created_at, documents(count)")
-      .order("created_at", { ascending: false })
-
-    if (data && data.length > 0) {
-      rawProjects = data as unknown as RawProjectRecord[]
-    } else {
-      const admin = createAdminClient()
-      const { data: users } = await admin.auth.admin.listUsers()
-      if (users && users.users.length > 0) {
-        const demoUser = users.users[0]
-        const { data: demoProjects } = await admin
-          .from("projects")
-          .select("id, name, user_id, created_at, documents(count)")
-          .eq("user_id", demoUser.id)
-          .order("created_at", { ascending: false })
-        if (demoProjects) {
-          rawProjects = demoProjects as unknown as RawProjectRecord[]
-        }
-      }
-    }
-  }
-
+  if (!user) redirect("/login")
+  const [{ data, error }, { data: sharedProjects, error: sharedError }] = await Promise.all([
+    supabase.from("projects").select("id, name, user_id, created_at, documents(count)")
+      .eq("user_id", user.id).order("created_at", { ascending: false }),
+    supabase.rpc("enterprise_chat_projects"),
+  ])
+  if (error) throw new Error("Unable to load projects.")
+  const shared = (sharedError ? [] : sharedProjects ?? []) as { id: string; name: string }[]
+  const rawProjects = (data as unknown as RawProjectRecord[]) || []
   const projects: ProjectCardData[] = rawProjects.map((p) => ({
     id: p.id,
     name: p.name,
@@ -91,14 +64,29 @@ export default async function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          {!isEmpty && <CreateProjectDialog />}
+          {(!isEmpty || shared.length > 0) && <CreateProjectDialog />}
+          <form action={signOut}><Button variant="ghost" type="submit">Sign out</Button></form>
           <ThemeToggle />
         </div>
       </header>
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col p-6 md:p-12 max-w-6xl w-full mx-auto">
-        {isEmpty ? (
+        {shared.length > 0 && (
+          <section className="mb-8">
+            <h2 className="mb-3 text-xl font-semibold">Employee Knowledge Copilot</h2>
+            <ul className="flex flex-wrap gap-3">
+              {shared.map(project => (
+                <li key={project.id}>
+                  <Link className="block rounded-md border px-4 py-3 hover:bg-muted" href={`/project/${project.id}`}>
+                    {project.name}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {isEmpty ? shared.length > 0 ? null : (
           /* Empty State: Clean, centered layout with folder icon, descriptive text, and primary create button */
           <div className="flex-1 flex flex-col items-center justify-center text-center my-auto py-16">
             <div className="size-20 rounded-3xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary mb-6 shadow-sm">

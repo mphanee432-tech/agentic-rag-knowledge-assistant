@@ -12,6 +12,8 @@
 
 # testing
 /coverage
+/artifacts/evaluation/
+/evals/*candidate*.json
 
 # next.js
 /.next/

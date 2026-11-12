@@ -1,0 +1,17 @@
+[
+  {"name":"single","text":"Answer [Chunk 1].","citations":[{"id":"a","index":1}],"indices":[1],"valid":true},
+  {"name":"grouped labels","text":"Answer [Chunk 1, Chunk 2].","citations":[{"id":"a","index":1},{"id":"b","index":2}],"indices":[1,2],"valid":true},
+  {"name":"grouped numbers","text":"Answer [chunk 1, 2].","citations":[{"id":"a","index":1},{"id":"b","index":2}],"indices":[1,2],"valid":true},
+  {"name":"spacing and case","text":"Answer [cHuNk\t01 , CHUNK 2].","citations":[{"id":"a","index":1},{"id":"b","index":2}],"indices":[1,2],"valid":true},
+  {"name":"repeated reference","text":"[Chunk 1, 1] then [Chunk 1]","citations":[{"id":"a","index":1}],"indices":[1,1,1],"valid":true},
+  {"name":"missing","text":"No references.","citations":[{"id":"a","index":1}],"indices":[],"valid":false},
+  {"name":"unknown grouped reference","text":"Answer [Chunk 1, Chunk 99].","citations":[{"id":"a","index":1}],"indices":[1,99],"valid":false},
+  {"name":"zero","text":"Answer [Chunk 0].","citations":[{"id":"a","index":1}],"indices":[0],"valid":false},
+  {"name":"empty id","text":"Answer [Chunk 1].","citations":[{"id":"","index":1}],"indices":[1],"valid":false},
+  {"name":"blank id","text":"Answer [Chunk 1].","citations":[{"id":"  ","index":1}],"indices":[1],"valid":false},
+  {"name":"malformed alongside valid","text":"[Chunk 1] [Chunk banana]","citations":[{"id":"a","index":1}],"indices":[1],"valid":false},
+  {"name":"cut off","text":"[Chunk 1] [Chunk 2","citations":[{"id":"a","index":1}],"indices":[1],"valid":false},
+  {"name":"trailing comma","text":"[Chunk 1,]","citations":[{"id":"a","index":1}],"indices":[],"valid":false},
+  {"name":"unicode digits are not indices","text":"[Chunk ١]","citations":[{"id":"a","index":1}],"indices":[],"valid":false},
+  {"name":"unicode digits alongside valid","text":"[Chunk 1] [Chunk ٢]","citations":[{"id":"a","index":1}],"indices":[1],"valid":false}
+]

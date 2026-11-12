@@ -1,98 +1,41 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { createClient } from '@supabase/supabase-js';
-import * as dotenv from 'dotenv';
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { resolve } from "node:path"
+import { pathToFileURL } from "node:url"
+import { createClient } from "@supabase/supabase-js"
+import { config } from "dotenv"
+import { validateGoldenDataset, type GoldenCase } from "../lib/eval-dataset"
 
-// Load credentials
-dotenv.config({ path: '.env.local' });
-dotenv.config({ path: '.env' });
+type NegativeLog = { id: string; query_text: string; project_id: string; feedback?: { issue_tag?: string } }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseKey =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error('Error: Missing Supabase credentials in environment.');
-  process.exit(1);
+export function regressionCandidates(logs: NegativeLog[], golden: GoldenCase[]) {
+  const seen = new Set(golden.map(row => JSON.stringify([row.projectId, row.query.trim().toLowerCase()])))
+  return logs.filter(log => {
+    if (typeof log.query_text !== "string" || !log.query_text.trim() || log.query_text.length > 2500) return false
+    const key = JSON.stringify([log.project_id, log.query_text.trim().toLowerCase()])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).map(log => ({ source_interaction_id: log.id, category: "Regression Testing", projectId: log.project_id,
+    query: log.query_text, issue: log.feedback?.issue_tag || "Telemetry reported failure", review_required: true }))
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-async function syncTelemetry() {
-  console.log('Fetching negative telemetry from Supabase interactions table...');
-
-  const { data: negativeLogs, error } = await supabase
-    .from('interactions')
-    .select('*')
-    .eq('feedback->>rating', 'thumbs_down')
-    .order('created_at', { ascending: false })
-    .limit(20);
-
-  if (error) {
-    console.error('Failed to query interactions:', error.message);
-    process.exit(1);
-  }
-
-  if (!negativeLogs || negativeLogs.length === 0) {
-    console.log('No negative telemetry (thumbs_down) found in database. Exiting.');
-    return;
-  }
-
-  console.log(`Found ${negativeLogs.length} thumbs_down interactions.`);
-
-  const evalPath = path.join(process.cwd(), 'evals', 'golden_dataset.json');
-  if (!fs.existsSync(evalPath)) {
-    console.error(`Error: Golden dataset not found at ${evalPath}`);
-    process.exit(1);
-  }
-
-  const rawData = fs.readFileSync(evalPath, 'utf8');
-  let dataset: any[] = JSON.parse(rawData);
-
-  let newRowsAdded = 0;
-
-  for (const log of negativeLogs) {
-    const query = log.query_text;
-    const projectId = log.project_id;
-    const issueTag = log.feedback?.issue_tag || 'Telemetry Reported Failure';
-
-    // Avoid duplicate test insertions
-    const exists = dataset.some(
-      (test) => test.vars?.query === query && test.vars?.projectId === projectId
-    );
-
-    if (!exists && query && projectId) {
-      dataset.push({
-        description: `[Telemetry Flywheel] ${issueTag}: ${query.slice(0, 50)}...`,
-        vars: {
-          projectId: projectId,
-          query: query,
-        },
-        assert: [
-          {
-            type: 'javascript',
-            value: "output.includes('[Chunk')",
-          },
-          {
-            type: 'javascript',
-            value: 'output.length <= 3000',
-          },
-          {
-            type: 'llm-rubric',
-            value: `The response must address the user query without hallucination and ground claims in the provided chunks. Issue previously reported: ${issueTag}`,
-          },
-        ],
-      });
-      newRowsAdded++;
-    }
-  }
-
-  if (newRowsAdded > 0) {
-    fs.writeFileSync(evalPath, JSON.stringify(dataset, null, 2), 'utf8');
-    console.log(`Successfully appended ${newRowsAdded} new regression rows to evals/golden_dataset.json!`);
-  } else {
-    console.log('All thumbs_down interactions are already present in the evaluation dataset.');
-  }
+async function main() {
+  config({ path: ".env.local" }); config({ path: ".env" })
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) throw new Error("Service credentials are required to collect review candidates.")
+  const output = resolve("evals/regression_candidates.json")
+  if (existsSync(output)) throw new Error("Review or move the existing regression_candidates.json before collecting again.")
+  const golden: unknown = JSON.parse(readFileSync("evals/golden_dataset.json", "utf8"))
+  validateGoldenDataset(golden)
+  const { data, error } = await createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } })
+    .from("interactions").select("id, query_text, project_id, feedback").eq("feedback->>rating", "thumbs_down")
+    .order("created_at", { ascending: false }).limit(20)
+  if (error) throw new Error("Unable to read negative telemetry.")
+  const candidates = regressionCandidates(data || [], golden)
+  writeFileSync(output, JSON.stringify(candidates, null, 2) + "\n", { flag: "wx" })
+  console.log(`Saved ${candidates.length} review candidates. The 50-case golden suite was not modified.`)
 }
 
-syncTelemetry().catch(console.error);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(error => { console.error(error instanceof Error ? error.message : "Sync failed"); process.exitCode = 1 })
+}

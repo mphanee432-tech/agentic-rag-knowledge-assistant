@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import { useState, useRef, useEffect } from "react"
+import { useShallow } from "zustand/react/shallow"
 import {
   UploadCloud,
   FileText,
@@ -20,6 +21,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { createClient } from "@/lib/supabase/client"
 import { useChatStore } from "@/lib/store/chat-store"
+import { loadWorkspace } from "@/lib/load-workspace"
 import type { RealtimeChannel } from "@supabase/supabase-js"
 
 interface DocumentUploaderProps {
@@ -52,7 +54,10 @@ export function DocumentUploader({
   const activeChannelRef = useRef<RealtimeChannel | null>(null)
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null)
 
-  const { documents, setDocuments, setSuggestedQueries } = useChatStore()
+  const { documents, setDocuments } = useChatStore(useShallow(state => ({
+    documents: state.documents,
+    setDocuments: state.setDocuments,
+  })))
   const activeCount = currentDocCount || documents.filter((d) => d.status !== "failed").length
   const isQuotaReached = activeCount >= 10
 
@@ -111,12 +116,13 @@ export function DocumentUploader({
     }
     setIsDeletingCorrupted(true)
     try {
-      await fetch(`/api/documents?documentId=${failedDocumentId}`, {
+      const response = await fetch(`/api/documents?documentId=${failedDocumentId}`, {
         method: "DELETE",
       })
+      if (!response.ok) throw new Error((await response.json()).error || "Unable to delete document.")
       const docRes = await fetch(`/api/documents?projectId=${projectId}`)
       const docData = await docRes.json()
-      if (docData.documents) {
+      if (docData.documents && useChatStore.getState().activeProjectId === projectId) {
         setDocuments(docData.documents)
       }
       setStatus("idle")
@@ -124,7 +130,7 @@ export function DocumentUploader({
       setFailedDocumentId(null)
       setUploadedFilename(null)
     } catch (err) {
-      console.error("Failed to delete corrupted document:", err)
+      setErrorMessage(err instanceof Error ? err.message : "Unable to delete document.")
     } finally {
       setIsDeletingCorrupted(false)
     }
@@ -170,47 +176,18 @@ export function DocumentUploader({
     try {
       const supabase = createClient()
 
-      // Resolve user context
-      let userId: string | null = null
-      const { data: authData } = await supabase.auth.getUser()
-      if (authData.user) {
-        userId = authData.user.id
-      } else {
-        // Resolve project's owner user_id
-        const { data: project } = await supabase
-          .from("projects")
-          .select("user_id")
-          .eq("id", projectId)
-          .single()
-
-        userId = project?.user_id || "dbc16ad3-391f-42fb-8792-db998609a2a5"
-
-        // Ensure client is authenticated if session is absent in demo mode
-        const { data: session } = await supabase.auth.getSession()
-        if (!session.session) {
-          await supabase.auth.signInWithPassword({
-            email: "engineer@internal.rag",
-            password: "demo-password-1234!",
-          }).catch(() => ({}))
-        }
-      }
-
-      const documentId = crypto.randomUUID()
+      const reservation = await fetch("/api/documents/upload-url", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, filename: file.name, fileSize: file.size }),
+      })
+      const upload = await reservation.json()
+      if (!reservation.ok) throw new Error(upload.error || "Unable to start upload.")
+      const { documentId, storagePath, token } = upload
       setFailedDocumentId(documentId)
-
-      // Direct Storage Path: ${userId}/${projectId}/${documentId}/${file.name}
-      const storagePath = `${userId}/${projectId}/${documentId}/${file.name}`
-
-      // Direct Supabase Storage Upload:
-      // The browser ONLY uploads binaries to Supabase Storage
-      const { error: uploadError } = await supabase.storage
-        .from("documents")
-        .upload(storagePath, file, {
-          contentType: file.type || "application/octet-stream",
-          upsert: true,
-        })
-
+      const { error: uploadError } = await supabase.storage.from("documents")
+        .uploadToSignedUrl(storagePath, token, file, { contentType: file.type || "application/octet-stream" })
       if (uploadError) {
+        await fetch("/api/documents?documentId=" + documentId, { method: "DELETE" })
         throw uploadError
       }
 
@@ -222,7 +199,7 @@ export function DocumentUploader({
       try {
         const docRes = await fetch(`/api/documents?projectId=${projectId}`)
         const docData = await docRes.json()
-        if (docData.documents) {
+        if (docData.documents && useChatStore.getState().activeProjectId === projectId) {
           setDocuments(docData.documents)
         }
       } catch (e) {}
@@ -242,24 +219,7 @@ export function DocumentUploader({
         setStatusText("Document fully indexed!")
 
         // Refresh documents and suggested queries to unlock chat
-        try {
-          const [docRes, projRes] = await Promise.all([
-            fetch(`/api/documents?projectId=${projectId}`),
-            fetch(`/api/projects?id=${projectId}`),
-          ])
-          if (docRes.ok) {
-            const docData = await docRes.json()
-            if (docData.documents) setDocuments(docData.documents)
-          }
-          if (projRes.ok) {
-            const projData = await projRes.json()
-            if (projData.project?.suggested_queries && Array.isArray(projData.project.suggested_queries)) {
-              setSuggestedQueries(projData.project.suggested_queries)
-            }
-          }
-        } catch (err) {
-          console.warn("Failed to refresh state after indexing:", err)
-        }
+        await loadWorkspace(projectId)
 
         if (onUploadSuccess) {
           onUploadSuccess()
@@ -290,7 +250,7 @@ export function DocumentUploader({
         try {
           const docRes = await fetch(`/api/documents?projectId=${projectId}`)
           const docData = await docRes.json()
-          if (docData.documents) setDocuments(docData.documents)
+          if (docData.documents && useChatStore.getState().activeProjectId === projectId) setDocuments(docData.documents)
         } catch (e) {}
       }
 
@@ -306,7 +266,8 @@ export function DocumentUploader({
             filter: `id=eq.${documentId}`,
           },
           (payload) => {
-            const nextStatus = (payload.new as { status?: string })?.status
+            const nextDocument = payload.new as { status?: string; last_ingestion_error?: string }
+            const nextStatus = nextDocument.status
             if (nextStatus === "indexed") {
               setStatus("indexed")
               supabase.removeChannel(channel)
@@ -314,7 +275,7 @@ export function DocumentUploader({
             } else if (nextStatus === "failed") {
               setStatus("failed")
               supabase.removeChannel(channel)
-              handleFailed()
+              handleFailed(nextDocument.last_ingestion_error)
             }
           }
         )
@@ -322,15 +283,16 @@ export function DocumentUploader({
 
       activeChannelRef.current = channel
 
-      // Resilient fallback poller every 2s for up to 60s
+      // Recovery includes multiple leases and backoff; a UI timeout is not an ingestion failure.
       let pollCount = 0
       pollTimerRef.current = setInterval(async () => {
         pollCount++
-        if (pollCount > 30) {
+        if (pollCount > 900) {
           if (pollTimerRef.current) {
             clearInterval(pollTimerRef.current)
             pollTimerRef.current = null
           }
+          setStatusText("Indexing continues in the background. Reload to check its progress.")
           return
         }
 
@@ -338,12 +300,12 @@ export function DocumentUploader({
           const res = await fetch(`/api/documents?projectId=${projectId}`)
           if (res.ok) {
             const data = await res.json()
-            const updatedDoc = (data.documents || []).find((d: any) => d.id === documentId)
+            const updatedDoc = (data.documents || []).find((d: { id: string; status: string; last_ingestion_error?: string }) => d.id === documentId)
             if (updatedDoc) {
               if (updatedDoc.status === "indexed") {
                 await handleIndexed()
               } else if (updatedDoc.status === "failed") {
-                await handleFailed()
+                await handleFailed(updatedDoc.last_ingestion_error)
               }
             }
           }

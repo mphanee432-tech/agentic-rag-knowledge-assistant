@@ -1,7 +1,9 @@
 "use client"
 
 import * as React from "react"
+import { sendChat } from "@/lib/send-chat"
 import { useRef, useEffect } from "react"
+import Link from "next/link"
 import {
   RotateCcw,
   Lock,
@@ -12,18 +14,18 @@ import { ChatMessages } from "@/components/chat/chat-messages"
 import { ChatInput } from "@/components/chat/chat-input"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { DocumentUploader } from "@/components/upload/document-uploader"
-import { useChatStore, type ChatMessage, type Citation } from "@/lib/store/chat-store"
+import { useChatStore } from "@/lib/store/chat-store"
 
 interface ChatContainerProps {
-  onSuggestedQuery?: (query: string) => void
   projectId?: string
   projectName?: string | null
+  enterprise?: boolean
 }
 
 export function ChatContainer({
-  onSuggestedQuery,
   projectId,
   projectName,
+  enterprise,
 }: ChatContainerProps) {
   const {
     messages,
@@ -32,10 +34,6 @@ export function ChatContainer({
     statusMessage,
     documents,
     suggestedQueries,
-    addMessage,
-    updateLastMessage,
-    setIsLoading,
-    setStatusMessage,
     clearChat,
   } = useChatStore()
 
@@ -48,111 +46,16 @@ export function ChatContainer({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, statusMessage])
 
-  const handleSendMessage = async (queryText: string) => {
-    if (!queryText.trim() || isLoading) return
+  const handleSendMessage = (query: string) => sendChat(query, effectiveProjectId)
 
-    const userMessageId = crypto.randomUUID()
-    const userMsg: ChatMessage = {
-      id: userMessageId,
-      role: "user",
-      content: queryText,
-    }
-
-    // Append user message (bounded 5-turn sliding window automatically enforced by store)
-    addMessage(userMsg)
-
-    const assistantMessageId = crypto.randomUUID()
-    const assistantPlaceholder: ChatMessage = {
-      id: assistantMessageId,
-      role: "assistant",
-      content: "",
-      citations: [],
-    }
-
-    addMessage(assistantPlaceholder)
-    setIsLoading(true)
-    setStatusMessage("Searching repository sources...")
-
-    try {
-      // Progressive pipeline feedback
-      const timer1 = setTimeout(() => {
-        setStatusMessage("Executing Hybrid Reciprocal Rank Fusion...")
-      }, 700)
-
-      const timer2 = setTimeout(() => {
-        setStatusMessage("Synthesizing verified code & citations...")
-      }, 1500)
-
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId: effectiveProjectId,
-          query: queryText,
-          messages: messages.slice(-10), // Send last 10 turns
-        }),
-      })
-
-      clearTimeout(timer1)
-      clearTimeout(timer2)
-
-      if (!response.ok) {
-        const errorJson = await response.json().catch(() => ({}))
-        throw new Error(errorJson.error || `HTTP error ${response.status}`)
-      }
-
-      // Extract custom metadata headers
-      const interactionId = response.headers.get("x-interaction-id") || undefined
-      let parsedCitations: Citation[] = []
-      const rawCitationsHeader = response.headers.get("x-citations")
-      if (rawCitationsHeader) {
-        try {
-          parsedCitations = JSON.parse(decodeURIComponent(rawCitationsHeader))
-        } catch (e) {
-          console.warn("Failed to parse x-citations header:", e)
-        }
-      }
-
-      // Stream response tokens
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error("Response body is not readable")
-      }
-
-      const decoder = new TextDecoder()
-      let accumulatedText = ""
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        const chunkText = decoder.decode(value, { stream: true })
-        accumulatedText += chunkText
-        updateLastMessage(accumulatedText, parsedCitations, interactionId)
-      }
-
-      // Final update
-      updateLastMessage(accumulatedText, parsedCitations, interactionId)
-    } catch (err) {
-      console.error("Chat streaming error:", err)
-      const errorMsg =
-        err instanceof Error
-          ? `Error: ${err.message}`
-          : "An error occurred while streaming response. Please verify network connectivity."
-      updateLastMessage(errorMsg)
-    } finally {
-      setIsLoading(false)
-      setStatusMessage(null)
-    }
-  }
-
-  const activeDocCount = documents.filter((d) => d.status !== "failed").length
+  const activeDocCount = documents.filter((d) => d.status === "indexed").length
 
   return (
     <main className="flex-1 flex flex-col h-full bg-white dark:bg-zinc-950 overflow-hidden">
       {/* Top Navigation Bar */}
       <header className="px-6 py-3 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between bg-white/80 dark:bg-zinc-950/80 backdrop-blur-sm z-10 shrink-0">
         <div className="flex items-center gap-3">
+          {enterprise && <Link href="/" className="text-xs text-muted-foreground hover:underline">Workspaces</Link>}
           <div className="flex items-center gap-2">
             <h1 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 tracking-tight">
               {projectName || "Untitled Project"}
@@ -166,6 +69,7 @@ export function ChatContainer({
               variant="ghost"
               size="xs"
               onClick={clearChat}
+              disabled={isLoading}
               className="text-xs h-7 gap-1 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
             >
               <RotateCcw className="size-3" />
@@ -177,7 +81,7 @@ export function ChatContainer({
       </header>
 
       {/* 0 Documents State (Hard Lock) */}
-      {activeDocCount === 0 ? (
+      {!enterprise && activeDocCount === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center p-6 md:p-12 overflow-y-auto">
           <div className="w-full max-w-xl mx-auto flex flex-col items-center text-center">
             <div className="size-16 rounded-3xl bg-amber-500/10 border border-amber-500/20 text-amber-500 flex items-center justify-center mb-4 shadow-xs">
@@ -189,11 +93,11 @@ export function ChatContainer({
               className="px-3 py-1 text-xs font-medium gap-1.5 border-amber-500/30 text-amber-600 dark:text-amber-400 bg-amber-500/10 mb-3"
             >
               <Lock className="size-3 text-amber-500" />
-              <span>Workspace Locked • 0 Documents</span>
+              <span>Workspace Locked • No Indexed Documents</span>
             </Badge>
 
             <h2 className="text-xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100 mb-2">
-              Upload a document in the sidebar to unlock the workspace.
+              Upload a document and wait for indexing to finish to unlock chat.
             </h2>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-md mx-auto mb-6 leading-relaxed">
               Upload at least one engineering document, API contract, or error log to provide grounded answers with citations.
@@ -203,7 +107,7 @@ export function ChatContainer({
             <DocumentUploader
               projectId={effectiveProjectId || ""}
               largeDropzone={true}
-              customInstruction="Upload a document in the sidebar to unlock the workspace."
+              customInstruction="Upload a document and wait for indexing to finish to unlock chat."
               className="w-full"
             />
           </div>

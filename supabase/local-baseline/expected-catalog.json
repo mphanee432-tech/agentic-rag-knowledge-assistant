@@ -1,0 +1,514 @@
+{
+  "projects": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": "gen_random_uuid()"
+      },
+      {
+        "name": "user_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "notnull": true,
+        "generated": false,
+        "expression": "timezone('utc'::text, now())"
+      },
+      {
+        "name": "name",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": "'Untitled Project'::text"
+      },
+      {
+        "name": "suggested_queries",
+        "type": "jsonb",
+        "notnull": false,
+        "generated": false,
+        "expression": "'[]'::jsonb"
+      }
+    ],
+    "constraints": [
+      {
+        "name": "projects_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "name": "projects_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      }
+    ],
+    "indexes": [
+      "CREATE INDEX idx_projects_user_id ON public.projects USING btree (user_id)",
+      "CREATE UNIQUE INDEX projects_pkey ON public.projects USING btree (id)"
+    ],
+    "policies": [
+      {
+        "name": "Projects tenant isolation policy",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(user_id = auth.uid())",
+        "check": "(user_id = auth.uid())"
+      },
+      {
+        "name": "owner_access",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "(user_id = auth.uid())",
+        "check": "(user_id = auth.uid())"
+      },
+      {
+        "name": "owner_boundary",
+        "permissive": "RESTRICTIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(user_id = auth.uid())",
+        "check": "(user_id = auth.uid())"
+      }
+    ]
+  },
+  "documents": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": "gen_random_uuid()"
+      },
+      {
+        "name": "project_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "storage_path",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "status",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "notnull": true,
+        "generated": false,
+        "expression": "timezone('utc'::text, now())"
+      },
+      {
+        "name": "expected_size",
+        "type": "bigint",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "ingestion_lease",
+        "type": "uuid",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "lease_expires_at",
+        "type": "timestamp with time zone",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "ingestion_attempts",
+        "type": "integer",
+        "notnull": true,
+        "generated": false,
+        "expression": "0"
+      },
+      {
+        "name": "next_ingestion_attempt_at",
+        "type": "timestamp with time zone",
+        "notnull": false,
+        "generated": false,
+        "expression": "now()"
+      },
+      {
+        "name": "ingestion_dispatched_at",
+        "type": "timestamp with time zone",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "last_ingestion_error",
+        "type": "text",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      }
+    ],
+    "constraints": [
+      {
+        "name": "documents_ingestion_attempts_check",
+        "definition": "CHECK (ingestion_attempts >= 0)"
+      },
+      {
+        "name": "documents_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "name": "documents_project_id_fkey",
+        "definition": "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
+      },
+      {
+        "name": "documents_status_check",
+        "definition": "CHECK (status = ANY (ARRAY['pending_upload'::text, 'uploaded'::text, 'processing'::text, 'indexed'::text, 'failed'::text]))"
+      }
+    ],
+    "indexes": [
+      "CREATE INDEX documents_ingestion_recovery ON public.documents USING btree (next_ingestion_attempt_at, lease_expires_at) WHERE (status = ANY (ARRAY['pending_upload'::text, 'uploaded'::text, 'processing'::text]))",
+      "CREATE UNIQUE INDEX documents_pkey ON public.documents USING btree (id)",
+      "CREATE UNIQUE INDEX documents_storage_path_unique ON public.documents USING btree (storage_path)",
+      "CREATE INDEX idx_documents_project_id ON public.documents USING btree (project_id)"
+    ],
+    "policies": [
+      {
+        "name": "Documents tenant isolation policy",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(EXISTS ( SELECT 1\n   FROM projects\n  WHERE ((projects.id = documents.project_id) AND (projects.user_id = auth.uid()))))",
+        "check": "(EXISTS ( SELECT 1\n   FROM projects\n  WHERE ((projects.id = documents.project_id) AND (projects.user_id = auth.uid()))))"
+      },
+      {
+        "name": "owner_boundary",
+        "permissive": "RESTRICTIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = documents.project_id) AND (p.user_id = auth.uid()))))",
+        "check": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = documents.project_id) AND (p.user_id = auth.uid()))))"
+      },
+      {
+        "name": "owner_document_delete",
+        "permissive": "PERMISSIVE",
+        "cmd": "DELETE",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "true",
+        "check": null
+      },
+      {
+        "name": "owner_read",
+        "permissive": "PERMISSIVE",
+        "cmd": "SELECT",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "true",
+        "check": null
+      }
+    ]
+  },
+  "document_chunks": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": "gen_random_uuid()"
+      },
+      {
+        "name": "document_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "project_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "content",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "metadata",
+        "type": "jsonb",
+        "notnull": true,
+        "generated": false,
+        "expression": "'{}'::jsonb"
+      },
+      {
+        "name": "embedding",
+        "type": "vector(1536)",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "notnull": true,
+        "generated": false,
+        "expression": "timezone('utc'::text, now())"
+      },
+      {
+        "name": "fts",
+        "type": "tsvector",
+        "notnull": false,
+        "generated": true,
+        "expression": "to_tsvector('simple'::regconfig, content)"
+      }
+    ],
+    "constraints": [
+      {
+        "name": "document_chunks_document_id_fkey",
+        "definition": "FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE"
+      },
+      {
+        "name": "document_chunks_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "name": "document_chunks_project_id_fkey",
+        "definition": "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
+      }
+    ],
+    "indexes": [
+      "CREATE UNIQUE INDEX document_chunks_pkey ON public.document_chunks USING btree (id)",
+      "CREATE INDEX idx_document_chunks_document_id ON public.document_chunks USING btree (document_id)",
+      "CREATE INDEX idx_document_chunks_embedding_hnsw ON public.document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m='32', ef_construction='128')",
+      "CREATE INDEX idx_document_chunks_fts ON public.document_chunks USING gin (fts)",
+      "CREATE INDEX idx_document_chunks_project_id ON public.document_chunks USING btree (project_id)"
+    ],
+    "policies": [
+      {
+        "name": "Tenant chunks isolation policy",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(EXISTS ( SELECT 1\n   FROM projects\n  WHERE ((projects.id = document_chunks.project_id) AND (projects.user_id = auth.uid()))))",
+        "check": "(EXISTS ( SELECT 1\n   FROM projects\n  WHERE ((projects.id = document_chunks.project_id) AND (projects.user_id = auth.uid()))))"
+      },
+      {
+        "name": "owner_boundary",
+        "permissive": "RESTRICTIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = document_chunks.project_id) AND (p.user_id = auth.uid()))))",
+        "check": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = document_chunks.project_id) AND (p.user_id = auth.uid()))))"
+      },
+      {
+        "name": "owner_read",
+        "permissive": "PERMISSIVE",
+        "cmd": "SELECT",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "true",
+        "check": null
+      }
+    ]
+  },
+  "interactions": {
+    "columns": [
+      {
+        "name": "id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": "gen_random_uuid()"
+      },
+      {
+        "name": "project_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "user_id",
+        "type": "uuid",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "query_text",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "retrieved_chunk_ids",
+        "type": "uuid[]",
+        "notnull": false,
+        "generated": false,
+        "expression": "'{}'::uuid[]"
+      },
+      {
+        "name": "response_markdown",
+        "type": "text",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "token_counts",
+        "type": "jsonb",
+        "notnull": false,
+        "generated": false,
+        "expression": "'{}'::jsonb"
+      },
+      {
+        "name": "latency_ms",
+        "type": "integer",
+        "notnull": true,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "rating",
+        "type": "text",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "issue_tag",
+        "type": "text",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "user_comment",
+        "type": "text",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      },
+      {
+        "name": "created_at",
+        "type": "timestamp with time zone",
+        "notnull": true,
+        "generated": false,
+        "expression": "timezone('utc'::text, now())"
+      },
+      {
+        "name": "feedback",
+        "type": "jsonb",
+        "notnull": false,
+        "generated": false,
+        "expression": null
+      }
+    ],
+    "constraints": [
+      {
+        "name": "interactions_pkey",
+        "definition": "PRIMARY KEY (id)"
+      },
+      {
+        "name": "interactions_project_id_fkey",
+        "definition": "FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE"
+      },
+      {
+        "name": "interactions_rating_check",
+        "definition": "CHECK (rating = ANY (ARRAY['thumbs_up'::text, 'thumbs_down'::text]))"
+      },
+      {
+        "name": "interactions_user_id_fkey",
+        "definition": "FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE"
+      }
+    ],
+    "indexes": [
+      "CREATE INDEX idx_interactions_project_id ON public.interactions USING btree (project_id)",
+      "CREATE INDEX idx_interactions_user_id ON public.interactions USING btree (user_id)",
+      "CREATE UNIQUE INDEX interactions_pkey ON public.interactions USING btree (id)"
+    ],
+    "policies": [
+      {
+        "name": "Interactions tenant isolation policy",
+        "permissive": "PERMISSIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(user_id = auth.uid())",
+        "check": "(user_id = auth.uid())"
+      },
+      {
+        "name": "owner_boundary",
+        "permissive": "RESTRICTIVE",
+        "cmd": "ALL",
+        "roles": [
+          "public"
+        ],
+        "qual": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = interactions.project_id) AND (p.user_id = auth.uid()))))",
+        "check": "(EXISTS ( SELECT 1\n   FROM projects p\n  WHERE ((p.id = interactions.project_id) AND (p.user_id = auth.uid()))))"
+      },
+      {
+        "name": "owner_feedback_update",
+        "permissive": "PERMISSIVE",
+        "cmd": "UPDATE",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "true",
+        "check": "true"
+      },
+      {
+        "name": "owner_read",
+        "permissive": "PERMISSIVE",
+        "cmd": "SELECT",
+        "roles": [
+          "authenticated"
+        ],
+        "qual": "true",
+        "check": null
+      }
+    ]
+  }
+}

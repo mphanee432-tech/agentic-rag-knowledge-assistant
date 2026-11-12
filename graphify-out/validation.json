@@ -1,0 +1,22 @@
+{
+  "indexed_files": 54,
+  "nodes": 362,
+  "edges": 769,
+  "communities": 18,
+  "protected_files_unchanged": 541,
+  "dangling_edges_in_output": 0,
+  "query_command": [
+    "C:/Users/User/.local/bin/graphify.exe",
+    "query",
+    "How are authentication and ownership enforced across API routes and Supabase clients?",
+    "--budget",
+    "4000"
+  ],
+  "query_exit_code": 0,
+  "query_output_header": "Graph: graphify-out/graph.json (362 nodes) | Traversal: BFS depth=2 | Start: ['apiError()', 'GET()', 'POST()', '@supabase/ssr'] | 94 nodes found",
+  "query_truncated": false,
+  "skipped_unclassified": [
+    "app/globals.css",
+    "app/favicon.ico"
+  ]
+}
