@@ -16,6 +16,10 @@ create function auth.uid() returns uuid language sql as $$
   select coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''),
     nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid
 $$;
+-- TEST ONLY: emulate Supabase auth.jwt() for disposable PostgreSQL CI tests.
+create function auth.jwt() returns jsonb language sql stable as $$
+  select coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb)
+$$;
 create function storage.foldername(name text) returns text[] language sql as $$ select string_to_array(name, '/') $$;
 create table public.projects(id uuid primary key default gen_random_uuid(), user_id uuid references auth.users,
   name text, suggested_queries jsonb, created_at timestamptz default now());
