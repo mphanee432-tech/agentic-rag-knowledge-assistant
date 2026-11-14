@@ -1,15 +1,16 @@
 import { google } from '@ai-sdk/google';
 import { APICallError, streamText, generateText, type LanguageModelUsage } from 'ai';
 import { GoogleGenAI } from '@google/genai';
-import { apiError, HttpError, requireChatProject } from '@/lib/auth';
+import { getEnterpriseCopilotContext, HttpError, requireChatProject, requireUser } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { assertValidAnswer, encodeEvent, NO_EVIDENCE, MAX_ANSWER_CHARS, type ChatEvent } from '@/lib/chat-contract';
+import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAnswer, NO_EVIDENCE, MAX_ANSWER_CHARS, type ChatEvent } from '@/lib/chat-contract';
 import { getSystemPrompt } from '@/lib/prompts/systemPrompt';
 
 import { parseChatInput } from '@/lib/chat-input';
 import { retrieveVerifiedChunks } from '@/lib/retrieve-chunks';
 import { withTimeout } from '@/lib/with-timeout';
 import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citations';
+import { getEnterpriseFallbackQuestions } from '@/lib/enterprise-fallback';
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Request failed';
 export const runtime = 'nodejs';
@@ -20,6 +21,51 @@ type FailureCategory = 'provider_timeout' | 'provider_error' | 'stream_interrupt
   | 'answer_empty' | 'answer_too_long' | 'invalid_citations' | 'interaction_write_failed'
   | 'request_cancelled' | 'unknown_error';
 
+function sanitizeProviderError(error: unknown): {
+  status: number | null;
+  code: string | null;
+  message: string | null;
+} {
+  if (!APICallError.isInstance(error)) {
+    return { status: null, code: null, message: null };
+  }
+  const status = typeof error.statusCode === 'number' ? error.statusCode : null;
+  let code: string | null = null;
+  let rawMessage = '';
+  if (typeof error.responseBody === 'string') {
+    try {
+      const parsed = JSON.parse(error.responseBody) as {
+        error?: { code?: unknown; status?: unknown; message?: unknown };
+      };
+      if (typeof parsed?.error?.status === 'string' && /^[A-Z0-9_]+$/.test(parsed.error.status)) {
+        code = parsed.error.status;
+      } else if (typeof parsed?.error?.code === 'number') {
+        code = String(parsed.error.code);
+      }
+      if (typeof parsed?.error?.message === 'string') {
+        rawMessage = parsed.error.message;
+      }
+    } catch {
+      // Ignore non-JSON provider error bodies
+    }
+  }
+  if (!code && status !== null) code = String(status);
+  const source = `${rawMessage} ${error.message || ''}`;
+  const message = /high demand|spikes in demand|temporarily unavailable|overloaded/i.test(source)
+    ? 'This model is currently experiencing high demand. Please try again later.'
+    : /quota|rate limit|resource[_\s]exhausted|too many requests/i.test(source)
+      ? 'Provider rate limit or quota exceeded.'
+      : /deadline exceeded|timed?\s*out/i.test(source)
+        ? 'Provider request timed out.'
+        : /not found|not supported/i.test(source)
+          ? 'Requested model or operation is not available.'
+          : /permission|unauthorized|unauthenticated|api key/i.test(source)
+            ? 'Provider authentication or permission failed.'
+            : status !== null
+              ? `Provider returned HTTP ${status}.`
+              : 'Provider request failed.';
+  return { status, code, message };
+}
 
 export async function POST(req: Request) {
   const reqStart = performance.now();
@@ -32,6 +78,9 @@ export async function POST(req: Request) {
   const failure = {
     failure_stage: null as FailureStage | null,
     failure_category: null as FailureCategory | null,
+    provider_error_status: null as number | null,
+    provider_error_code: null as string | null,
+    provider_error_message: null as string | null,
     model_stream_completed: false,
     interaction_write_started: false,
   };
@@ -46,6 +95,12 @@ export async function POST(req: Request) {
       ? 'provider_timeout'
       : (modelStage && (cancelled || req.signal.aborted)) || (req.signal.aborted && error === req.signal.reason) ? 'request_cancelled'
       : APICallError.isInstance(error) ? 'provider_error' : category;
+    if (failure.failure_category === 'provider_error') {
+      const sanitized = sanitizeProviderError(error);
+      failure.provider_error_status = sanitized.status;
+      failure.provider_error_code = sanitized.code;
+      failure.provider_error_message = sanitized.message;
+    }
   };
 
   const telemetry = {
@@ -90,10 +145,15 @@ export async function POST(req: Request) {
     let input;
     try { input = parseChatInput(JSON.parse(rawBody)); }
     catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid request.'); }
-    const { projectId, userQuery, boundedHistory } = input;
+    const { projectId, organizationId, userQuery, boundedHistory } = input;
     telemetry.request_parse_ms = performance.now() - reqStart;
     const authStart = performance.now();
-    const { user, supabase, enterprise } = await requireChatProject(projectId, req);
+    const { user, supabase, enterprise } = projectId
+      ? await requireChatProject(projectId, req)
+      : { ...await requireUser(req), enterprise: true };
+    if (organizationId && !await getEnterpriseCopilotContext(supabase, organizationId)) {
+      throw new HttpError(404, 'Organization not found.');
+    }
     telemetry.auth_ms = performance.now() - authStart;
     const promptVariant = req.headers.get('x-prompt-variant') || input.promptVariant;
     isEvalMode = !input.wantsStream && (input.isEvalMode || req.headers.get('x-eval-mode') === 'true');
@@ -137,7 +197,7 @@ export async function POST(req: Request) {
 
     // The authenticated search RPC applies document RLS before both rankings.
     const tRetrievalStart = performance.now();
-    const relevantChunks = await retrieveVerifiedChunks(supabase, projectId, queryEmbedding, userQuery, req.signal, telemetry, enterprise);
+    const relevantChunks = await retrieveVerifiedChunks(supabase, projectId, queryEmbedding, userQuery, req.signal, telemetry, enterprise, organizationId);
     telemetry.retrieval_ms = Math.round(performance.now() - tRetrievalStart);
 
     const promptStart = performance.now();
@@ -151,10 +211,11 @@ export async function POST(req: Request) {
             .join('\n\n')
         : 'NO_CONTEXT_FOUND';
 
-    const systemPrompt = getSystemPrompt(enterprise ? 'strict' : promptVariant, contextBlock);
+    const systemPrompt = getSystemPrompt(enterprise ? 'enterprise' : promptVariant, contextBlock);
+    const refusalText = enterprise ? ENTERPRISE_NO_EVIDENCE : NO_EVIDENCE;
     // Previous enterprise answers may contain evidence whose grants have since expired.
     const messages = enterprise ? [{ role: 'user' as const, content: userQuery }] : boundedHistory;
-    const generationModelId = process.env.CHAT_MODEL || 'gemini-3.1-flash-lite';
+    const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
     telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
     telemetry.retrieved_chunk_count = relevantChunks.length;
 
@@ -167,13 +228,21 @@ export async function POST(req: Request) {
 
 
     let contextString = relevantChunks.map((c, i: number) => `[Chunk ${i + 1}]: ${c.content}`).join('\n\n');
+    const isEnterpriseRefusal = (value: string) => {
+      const trimmed = value.trim();
+      return isNoEvidenceAnswer(trimmed)
+        || /^I don't know(?:\s+based on the documents I can access)?\.?(?:\s*\[Chunk[^\]]*\])*\s*$/i.test(trimmed);
+    };
     const prepareEnterpriseAnswer = async (text: string, finishReason: string, signal: AbortSignal) => {
       if (!enterprise || finishReason !== 'stop') return text;
-      if (text.trim() !== NO_EVIDENCE && text.length <= MAX_ANSWER_CHARS && validCitations(text, citations)) {
-        const { data, error } = await withTimeout(Promise.resolve(supabase.rpc('rag_chunks_still_visible', {
-          target_project_id: projectId,
-          chunk_ids: relevantChunks.map(chunk => chunk.id),
-        }).abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5000)]))), 5000, 'Evidence authorization');
+      if (!isEnterpriseRefusal(text) && text.length <= MAX_ANSWER_CHARS && validCitations(text, citations)) {
+        const chunkIds = relevantChunks.map(chunk => chunk.id);
+        const visibility = organizationId
+          ? supabase.rpc('enterprise_chunks_still_visible', { target_organization_id: organizationId, chunk_ids: chunkIds })
+          : supabase.rpc('rag_chunks_still_visible', { target_project_id: projectId, chunk_ids: chunkIds });
+        const { data, error } = await withTimeout(Promise.resolve(
+          visibility.abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5000)])),
+        ), 5000, 'Evidence authorization');
         signal.throwIfAborted();
         if (error) throw new Error('Unable to verify evidence authorization.');
         if (data === true) {
@@ -184,7 +253,7 @@ export async function POST(req: Request) {
       }
       citations = [];
       contextString = '';
-      return NO_EVIDENCE;
+      return ENTERPRISE_NO_EVIDENCE;
     };
 
     const finalizeAnswer = async (text: string, finishReason: string, signal = req.signal) => {
@@ -200,7 +269,7 @@ export async function POST(req: Request) {
       }
       telemetry.generation_ms = Math.round(performance.now() - generationStart);
       telemetry.total_ms = Math.round(performance.now() - reqStart);
-      if (enterprise) {
+      if (enterprise || !projectId) {
         signal.throwIfAborted();
         return;
       }
@@ -250,8 +319,12 @@ export async function POST(req: Request) {
       'x-rag-retrieval-ms': String(telemetry.retrieval_ms),
     };
     const generationStart = performance.now();
+    const fallbackQuestionsFor = (text: string, signal: AbortSignal) =>
+      organizationId && text === ENTERPRISE_NO_EVIDENCE
+        ? getEnterpriseFallbackQuestions(supabase, organizationId, signal)
+        : [];
     if (isEvalMode) {
-      let text = NO_EVIDENCE;
+      let text = refusalText;
       let finishReason = 'stop';
       if (relevantChunks.length) {
         const result = await generateText({
@@ -264,8 +337,10 @@ export async function POST(req: Request) {
       }
       text = await prepareEnterpriseAnswer(text, finishReason, req.signal);
       await finalizeAnswer(text, finishReason);
+      const fallbackQuestions = await fallbackQuestionsFor(text, req.signal);
       logTiming('success');
       return Response.json({ text, output: text, context: contextString, citations,
+        ...(fallbackQuestions.length ? { fallbackQuestions } : {}),
         retrieved_chunks: citations.map(c => ({ id: c.id, index: c.index })),
         ...(!enterprise ? { interactionId } : {}), metrics: telemetry }, { headers });
     }
@@ -294,7 +369,7 @@ export async function POST(req: Request) {
           let emittedLength = 0;
           let finishReason = 'stop';
           if (!relevantChunks.length) {
-            text = NO_EVIDENCE;
+            text = refusalText;
             telemetry.ttft_ms = Math.round(performance.now() - reqStart);
             if (!enterprise) {
               send({ type: 'text', text });
@@ -346,10 +421,12 @@ export async function POST(req: Request) {
           const signal = AbortSignal.any([req.signal, streamAbort.signal]);
           text = await prepareEnterpriseAnswer(text, finishReason, signal);
           await finalizeAnswer(text, finishReason, signal);
+          const fallbackQuestions = await fallbackQuestionsFor(text, signal);
           if (enterprise) send({ type: 'metadata', citations });
           if (text.length > emittedLength) send({ type: 'text', text: text.slice(emittedLength) });
           if (!cancelled) telemetry.server_finish_ready_ms = performance.now() - reqStart;
           send({ type: 'finish', metrics: telemetry,
+            ...(fallbackQuestions.length ? { fallbackQuestions } : {}),
             ...(req.headers.get('x-eval-mode') === 'true' ? { context: contextString } : {}) });
           succeeded = true;
         } catch (error) {
@@ -372,6 +449,8 @@ export async function POST(req: Request) {
   } catch (error) {
     recordFailure(stage, error);
     logTiming(req.signal.aborted ? 'cancelled' : 'error');
-    return apiError(error);
+    return error instanceof HttpError
+      ? Response.json({ error: error.message }, { status: error.status })
+      : Response.json({ error: 'The request could not be completed.' }, { status: 500 });
   }
 }

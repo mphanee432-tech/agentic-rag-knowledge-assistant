@@ -22,3 +22,12 @@ test("assistant content matching query still gets a real user turn", () => {
   assert.equal(result.boundedHistory.at(-1)?.role, "user")
 })
 
+test("organization chat accepts only a valid organization scope without a project", () => {
+  const organizationId = "22222222-2222-4222-8222-222222222222"
+  const request = { organizationId, query: "hello" }
+  assert.equal(parseChatInput(request).organizationId, organizationId)
+  assert.equal(parseChatInput(request).projectId, null)
+  assert.throws(() => parseChatInput({ ...request, projectId }))
+  assert.throws(() => parseChatInput({ ...request, organizationId: "-".repeat(36) }))
+})
+

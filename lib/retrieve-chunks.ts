@@ -4,9 +4,9 @@ import { withTimeout } from "@/lib/with-timeout"
 export interface RagChunk { id: string; content: string; metadata: Record<string, unknown> }
 
 export async function retrieveVerifiedChunks(
-  supabase: SupabaseClient, projectId: string, queryEmbedding: number[], userQuery: string,
+  supabase: SupabaseClient, projectId: string | null, queryEmbedding: number[], userQuery: string,
   signal: AbortSignal, telemetry: { retries: { retrieval: number }; errors: string[]; rrf_rpc_ms?: number | null; chunk_verify_ms?: number | null },
-  enterprise = false,
+  enterprise = false, organizationId: string | null = null,
 ): Promise<RagChunk[]> {
   telemetry.rrf_rpc_ms = telemetry.chunk_verify_ms = null
   const rpcStart = performance.now()
@@ -14,10 +14,12 @@ export async function retrieveVerifiedChunks(
   try {
     for (let attempt = 0; attempt <= 1; attempt++) {
       try {
+        const query = { query_embedding: queryEmbedding, query_text: userQuery }
+        const search = organizationId
+          ? supabase.rpc("search_enterprise_chunks", { ...query, target_organization_id: organizationId })
+          : supabase.rpc("search_rag_chunks", { ...query, target_project_id: projectId?.trim() })
         const { data, error } = await withTimeout(Promise.resolve(
-          supabase.rpc("search_rag_chunks", {
-            query_embedding: queryEmbedding, query_text: userQuery, target_project_id: projectId.trim(),
-          }).select(enterprise ? "id,content" : "id")
+          search.select(enterprise ? "id,content" : "id")
             .abortSignal(AbortSignal.any([signal, AbortSignal.timeout(15000)]))
             .overrideTypes<Array<{ id: string; content: string }>, { merge: false }>(),
         ), 15000, "Supabase Hybrid Search RPC")
@@ -40,7 +42,7 @@ export async function retrieveVerifiedChunks(
   } finally {
     telemetry.rrf_rpc_ms = performance.now() - rpcStart
   }
-  if (!rankedIds.length) return []
+  if (!projectId || !rankedIds.length) return []
 
   // Personal citations use the owner's existing RLS path for source metadata.
   const verifyStart = performance.now()

@@ -5,6 +5,9 @@ import { GET as listDocuments, DELETE as deleteDocument } from "../app/api/docum
 import { POST as reserveUpload } from "../app/api/documents/upload-url/route"
 import { POST as feedback } from "../app/api/feedback/route"
 import { POST as chat } from "../app/api/chat/route"
+import { POST as ingestPolicy } from "../app/api/enterprise/ingest/route"
+import { POST as onboardEmployee } from "../app/api/enterprise/onboard/route"
+import { DEMO_DEPARTMENTS } from "../lib/utils"
 
 test("public routes enforce identity and ownership before privileged operations", async t => {
   const env = {
@@ -39,6 +42,65 @@ test("public routes enforce identity and ownership before privileged operations"
     () => chat(request("/api/chat", token, "POST", { projectId: project, query: "Test question", stream: true })),
     () => chat(request("/api/chat", token, "POST", { projectId: project, query: "Test question", stream: false })),
   ]
+
+  await t.test("enterprise upload uses the department reservation and rejects an employee before Storage", async st => {
+    const organizationId = "55555555-5555-4555-8555-555555555555"
+    const departmentId = "66666666-6666-4666-8666-666666666666"
+    let signingCalls = 0
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      const headers = new Headers(init?.headers)
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-a", role: "authenticated" })
+      if (url.pathname.endsWith("/reserve_enterprise_policy")) {
+        assert.equal(headers.get("apikey"), env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+        if (headers.get("authorization") === "Bearer employee") {
+          return Response.json({ code: "42501", message: "denied" }, { status: 403 })
+        }
+        const params = JSON.parse(String(init?.body))
+        assert.deepEqual(params, {
+          target_organization_id: organizationId, target_department_id: departmentId,
+          p_document_id: params.p_document_id, p_filename: "policy.html", p_expected_size: 10,
+          p_classification: "restricted", p_access_scope: "department",
+        })
+        return Response.json({ project_id: projects.b, storage_path: `enterprise/${projects.b}/${params.p_document_id}/policy.html` })
+      }
+      assert.match(url.pathname, new RegExp(`^/storage/v1/object/upload/sign/documents/enterprise/${projects.b}/`))
+      assert.equal(headers.get("apikey"), env.SUPABASE_SERVICE_ROLE_KEY)
+      signingCalls++
+      return Response.json({ url: "/object/upload/sign/documents/path?token=signed-token" })
+    })
+    const policy = { organizationId, departmentId, projectId: projects.a,
+      filename: "policy.html", fileSize: 10, classification: "restricted", accessScope: "department" }
+    const path = "/api/documents/upload-url"
+    assert.equal((await reserveUpload(request(path, "employee", "POST", policy))).status, 403)
+    assert.equal((await reserveUpload(request(path, "uploader", "POST", { ...policy, accessScope: "company" }))).status, 400)
+    assert.equal(signingCalls, 0)
+    const response = await reserveUpload(request(path, "uploader", "POST", policy))
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).projectId, projects.b)
+    assert.equal(signingCalls, 1)
+  })
+
+  await t.test("an indexed but unpublished reservation can be published on retry", async st => {
+    const calls: string[] = []
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      calls.push(url.pathname)
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-a", role: "authenticated" })
+      if (url.pathname.endsWith("/can_upload_enterprise_policy")) return Response.json(true)
+      if (url.pathname.endsWith("/documents")) {
+        assert.equal(url.searchParams.get("project_id"), `eq.${projects.b}`)
+        return Response.json([{ id: docId, status: "indexed", is_published: false }])
+      }
+      assert.match(url.pathname, /publish_enterprise_document$/)
+      assert.deepEqual(JSON.parse(String(init?.body)), { p_document_id: docId })
+      return Response.json(null)
+    })
+    const response = await ingestPolicy(request("/api/enterprise/ingest", "uploader", "POST", { documentId: docId, projectId: projects.b }))
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { success: true, alreadyIndexed: true, isPublished: true })
+    assert.equal(calls.length, 4)
+  })
 
   await t.test("invalid sessions cannot list, create, delete, reserve, submit feedback or chat", async st => {
     let privateCalls = 0
@@ -171,19 +233,19 @@ test("public routes enforce identity and ownership before privileged operations"
     }
   })
 
-  await t.test("a rejected quota reservation cannot issue an upload token", async st => {
+  await t.test("a rejected reservation cannot issue an upload token", async st => {
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-a" })
       if (url.pathname === "/rest/v1/projects") return Response.json([{ id: projects.a, user_id: "user-a" }])
       assert.equal(url.pathname, "/rest/v1/documents", "Rejected reservations must never reach Storage signing")
       assert.equal(init?.method, "POST")
-      return Response.json({ message: "Project document limit reached" }, { status: 400 })
+      return Response.json({ message: "Reservation rejected" }, { status: 400 })
     })
     const response = await reserveUpload(request("/api/documents/upload-url", "token-a", "POST", {
       projectId: projects.a, filename: "source.txt", fileSize: 5,
     }))
-    assert.equal(response.status, 409)
+    assert.equal(response.status, 500)
     assert.equal((await response.json()).token, undefined)
   })
 
@@ -223,5 +285,116 @@ test("public routes enforce identity and ownership before privileged operations"
     const response = await deleteDocument(request(`/api/documents?documentId=${docId}`, "token-a", "DELETE", { storagePath: "victim/file.txt" }))
     assert.equal(response.status, 200)
     assert.deepEqual(mutations, ["document", "storage"])
+  })
+
+  await t.test("public demo onboarding assigns one-time employee role and rejects privilege escalation or department changes", async st => {
+    assert.deepEqual(DEMO_DEPARTMENTS, [
+      "Engineering",
+      "HR",
+      "Product Management",
+      "Project Management",
+      "UI/UX",
+      "Operations",
+      "Marketing",
+      "Finance",
+    ])
+    const organizationId = "c0000000-0000-4000-8000-000000000001"
+    const departmentIds: Record<string, string> = {
+      Engineering: "c0000000-0000-4000-8000-000000000002",
+      HR: "859355c7-c42c-4db8-b827-a13d0b827641",
+    }
+    const assignments = new Map<string, string>()
+
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      const headers = new Headers(init?.headers)
+      assert.equal(headers.get("apikey"), env.NEXT_PUBLIC_SUPABASE_ANON_KEY, "Onboarding must never use service-role")
+      const authHeader = headers.get("authorization") || ""
+      if (url.pathname === "/auth/v1/user") {
+        if (authHeader === "Bearer expired") return Response.json({ message: "Invalid" }, { status: 401 })
+        const userId = authHeader.replace(/^Bearer /, "")
+        return Response.json({ id: userId, aud: "authenticated", role: "authenticated" })
+      }
+      if (url.pathname === "/rest/v1/rpc/onboard_demo_employee") {
+        const userId = authHeader.replace(/^Bearer /, "")
+        const { target_department } = JSON.parse(String(init?.body)) as { target_department: string }
+        const deptId = departmentIds[target_department]
+        if (!deptId) {
+          return Response.json({ code: "22023", message: "Invalid department" }, { status: 400 })
+        }
+        const existing = assignments.get(userId)
+        if (existing && existing !== deptId) {
+          return Response.json(
+            { code: "42501", message: "Department assignment is one-time and cannot be changed" },
+            { status: 403 },
+          )
+        }
+        assignments.set(userId, deptId)
+        return Response.json([{ organization_id: organizationId, department_id: deptId, role: "employee" }])
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`)
+    })
+
+    // Unauthenticated onboarding is rejected
+    assert.equal(
+      (await onboardEmployee(request("/api/enterprise/onboard", "expired", "POST", { department: "Engineering" }))).status,
+      401,
+    )
+
+    // Invalid department is rejected before calling RPC
+    for (const invalidDept of ["", "Admin", "Executive", null, 123]) {
+      const res = await onboardEmployee(
+        request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: invalidDept }),
+      )
+      assert.equal(res.status, 400)
+    }
+
+    // Attempts to request non-employee roles, grants, or uploader privileges are rejected with 403
+    for (const body of [
+      { department: "Engineering", role: "manager" },
+      { department: "Engineering", role: "cxo" },
+      { department: "Engineering", can_upload_policy: true },
+      { department: "Engineering", is_active: true },
+      { department: "Engineering", grants: [docId] },
+      { department: "Engineering", project_memberships: [projects.a] },
+    ]) {
+      const res = await onboardEmployee(request("/api/enterprise/onboard", "recruiter-eng", "POST", body))
+      assert.equal(res.status, 403)
+    }
+
+    // 1. Recruiter signs up and selects Engineering
+    const engRes = await onboardEmployee(
+      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "Engineering" }),
+    )
+    assert.equal(engRes.status, 200)
+    assert.deepEqual(await engRes.json(), {
+      organizationId,
+      departmentId: departmentIds.Engineering,
+      role: "employee",
+    })
+    assert.match(engRes.headers.get("set-cookie") || "", /pending_demo_department=;.*Max-Age=0/)
+
+    // Idempotent retry with the same department succeeds
+    const engRetry = await onboardEmployee(
+      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "Engineering" }),
+    )
+    assert.equal(engRetry.status, 200)
+
+    // 6. Attempting to switch department afterward is denied with 403
+    const switchRes = await onboardEmployee(
+      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "HR" }),
+    )
+    assert.equal(switchRes.status, 403)
+
+    // 4. HR signup receives HR employee assignment
+    const hrRes = await onboardEmployee(
+      request("/api/enterprise/onboard", "recruiter-hr", "POST", { department: "HR" }),
+    )
+    assert.equal(hrRes.status, 200)
+    assert.deepEqual(await hrRes.json(), {
+      organizationId,
+      departmentId: departmentIds.HR,
+      role: "employee",
+    })
   })
 })

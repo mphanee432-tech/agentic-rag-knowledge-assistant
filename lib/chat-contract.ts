@@ -2,7 +2,13 @@ import { validCitations } from "./citations"
 export { citationIndices, validCitations } from "./citations"
 
 export const NO_EVIDENCE = "I don't know."
+export const ENTERPRISE_NO_EVIDENCE = "I don't know based on the documents I can access."
 export const MAX_ANSWER_CHARS = 3000
+
+export function isNoEvidenceAnswer(text: string): boolean {
+  const normalized = text.trim()
+  return normalized === NO_EVIDENCE || normalized === ENTERPRISE_NO_EVIDENCE
+}
 export interface StreamCitation {
   id: string
   index: number
@@ -12,7 +18,7 @@ export interface StreamCitation {
 export type ChatEvent =
   | { type: "metadata"; interactionId?: string; citations: StreamCitation[] }
   | { type: "text"; text: string }
-  | { type: "finish"; metrics: Record<string, unknown>; context?: string }
+  | { type: "finish"; metrics: Record<string, unknown>; context?: string; fallbackQuestions?: string[] }
   | { type: "error"; message: string }
 
 export function encodeEvent(event: ChatEvent): Uint8Array {
@@ -50,7 +56,7 @@ export async function readChatStream(response: Response, onEvent: (event: ChatEv
 export function assertValidAnswer(text: string, citations: StreamCitation[], finishReason: string) {
   if (finishReason !== "stop") throw new Error("Generation did not complete.")
   if (!text.trim() || text.length > MAX_ANSWER_CHARS) throw new Error("Answer is empty or exceeds the length limit.")
-  if (text.trim() !== NO_EVIDENCE && !validCitations(text, citations)) {
+  if (!isNoEvidenceAnswer(text) && !validCitations(text, citations)) {
     throw new Error("Answer contains missing or invalid citations.")
   }
 }

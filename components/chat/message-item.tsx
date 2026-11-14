@@ -19,7 +19,11 @@ const REFUSAL_PREFIX = "I couldn't find evidence in this project's documents"
 
 export function MessageItem({ message, isStreaming = false }: MessageItemProps) {
   const isUser = message.role === "user"
-  const isRefusal = message.content.includes(REFUSAL_PREFIX)
+  const displayContent = !isUser && !isStreaming && !message.content.trim()
+    ? "Error: The answer could not be completed. Please retry."
+    : message.content
+  const isError = !isUser && /^Error:/i.test(displayContent.trim())
+  const isRefusal = !isError && displayContent.includes(REFUSAL_PREFIX)
   const citations = message.citations || []
 
   return (
@@ -45,11 +49,19 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
           className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-xs ${
             isUser
               ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950 rounded-br-xs"
+              : isError
+              ? "bg-red-500/10 border border-red-500/25 text-red-700 dark:text-red-300 rounded-bl-xs w-full"
               : isRefusal
               ? "bg-amber-500/10 border border-amber-500/20 text-zinc-800 dark:text-zinc-200 rounded-bl-xs w-full"
               : "bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-900 dark:text-zinc-100 rounded-bl-xs w-full"
           }`}
         >
+          {isError && (
+            <div className="flex items-center gap-2 mb-1.5 font-medium text-xs text-red-600 dark:text-red-400">
+              <AlertCircle className="size-4 shrink-0" />
+              <span>Response Error</span>
+            </div>
+          )}
           {isRefusal && (
             <div className="flex items-center gap-2 mb-2 font-medium text-xs text-amber-600 dark:text-amber-400">
               <AlertCircle className="size-4" />
@@ -60,7 +72,7 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
           {/* Render formatted message content */}
           <div className="prose prose-sm dark:prose-invert max-w-none break-words">
             <FormattedContent
-              content={message.content}
+              content={displayContent}
               citations={citations}
             />
           </div>
@@ -79,10 +91,10 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
           )}
 
           {/* Assistant message actions directly below content */}
-          {!isUser && !isStreaming && (
+          {!isUser && !isStreaming && !isError && (
             <MessageActions
               interactionId={message.interactionId}
-              content={message.content}
+              content={displayContent}
             />
           )}
         </div>

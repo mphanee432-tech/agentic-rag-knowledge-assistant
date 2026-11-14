@@ -22,6 +22,7 @@ export const metadata: Metadata = {
 }
 
 import { ThemeProvider } from "@/components/theme-provider"
+import { ChatSessionBoundary } from "@/components/sign-out"
 
 export default function RootLayout({
   children,
@@ -41,6 +42,7 @@ export default function RootLayout({
     >
       <body className="h-full flex flex-col bg-background text-foreground overflow-hidden">
         <ThemeProvider>
+          <ChatSessionBoundary />
           {children}
         </ThemeProvider>
       </body>

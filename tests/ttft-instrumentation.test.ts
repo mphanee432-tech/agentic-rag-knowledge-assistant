@@ -225,6 +225,19 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
           assert.equal(log.interaction_id, response.headers.get("x-interaction-id"))
           assert.equal(log.failure_stage, scenario.stage ?? null)
           assert.equal(log.failure_category, scenario.category ?? null)
+          if (scenario.providerError) {
+            assert.equal(log.provider_error_status, 400)
+            assert.equal(log.provider_error_code, "400")
+            assert.equal(log.provider_error_message, "Provider returned HTTP 400.")
+          } else if (scenario.interrupted) {
+            assert.equal(log.provider_error_status, 200)
+            assert.equal(log.provider_error_code, "200")
+            assert.equal(log.provider_error_message, "Provider returned HTTP 200.")
+          } else {
+            assert.equal(log.provider_error_status, null)
+            assert.equal(log.provider_error_code, null)
+            assert.equal(log.provider_error_message, null)
+          }
           assert.equal(log.had_first_text, !scenario.empty && !scenario.json && !scenario.providerError && !scenario.deadline &&
             !scenario.cancel && !scenario.requestAbort && scenario.answer.length > 0 && scenario.answer.length <= MAX_ANSWER_CHARS)
           assert.equal(log.model_stream_completed, !scenario.empty && !scenario.json && !scenario.providerError &&

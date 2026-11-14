@@ -4,9 +4,10 @@ import {
   Database,
 } from "lucide-react"
 import { createServerClient } from "@/lib/supabase/server"
+import { getEnterpriseCopilotContext } from "@/lib/auth"
 import { redirect } from "next/navigation"
-import Link from "next/link"
-import { signOut } from "@/app/actions/auth"
+import { ProjectWorkspaceClient } from "@/components/chat/project-workspace-client"
+import { SignOut } from "@/components/sign-out"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { Button } from "@/components/ui/button"
 import { CreateProjectDialog } from "@/components/dashboard/create-project-dialog"
@@ -27,13 +28,17 @@ export default async function DashboardPage() {
   } = await supabase.auth.getUser()
 
   if (!user) redirect("/login")
-  const [{ data, error }, { data: sharedProjects, error: sharedError }] = await Promise.all([
-    supabase.from("projects").select("id, name, user_id, created_at, documents(count)")
-      .eq("user_id", user.id).order("created_at", { ascending: false }),
-    supabase.rpc("enterprise_chat_projects"),
-  ])
+  const enterprise = await getEnterpriseCopilotContext(supabase)
+  if (enterprise) return <ProjectWorkspaceClient
+    userId={user.id}
+    organizationId={enterprise.organization_id}
+    canUploadPolicy={enterprise.can_upload_policy}
+  />
+
+  const { data, error } = await supabase.from("projects")
+    .select("id, name, user_id, created_at, documents(count)")
+    .eq("user_id", user.id).order("created_at", { ascending: false })
   if (error) throw new Error("Unable to load projects.")
-  const shared = (sharedError ? [] : sharedProjects ?? []) as { id: string; name: string }[]
   const rawProjects = (data as unknown as RawProjectRecord[]) || []
   const projects: ProjectCardData[] = rawProjects.map((p) => ({
     id: p.id,
@@ -64,29 +69,15 @@ export default async function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-3">
-          {(!isEmpty || shared.length > 0) && <CreateProjectDialog />}
-          <form action={signOut}><Button variant="ghost" type="submit">Sign out</Button></form>
+          {!isEmpty && <CreateProjectDialog />}
+          <SignOut />
           <ThemeToggle />
         </div>
       </header>
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col p-6 md:p-12 max-w-6xl w-full mx-auto">
-        {shared.length > 0 && (
-          <section className="mb-8">
-            <h2 className="mb-3 text-xl font-semibold">Employee Knowledge Copilot</h2>
-            <ul className="flex flex-wrap gap-3">
-              {shared.map(project => (
-                <li key={project.id}>
-                  <Link className="block rounded-md border px-4 py-3 hover:bg-muted" href={`/project/${project.id}`}>
-                    {project.name}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        {isEmpty ? shared.length > 0 ? null : (
+        {isEmpty && (
           /* Empty State: Clean, centered layout with folder icon, descriptive text, and primary create button */
           <div className="flex-1 flex flex-col items-center justify-center text-center my-auto py-16">
             <div className="size-20 rounded-3xl bg-primary/10 border border-primary/20 flex items-center justify-center text-primary mb-6 shadow-sm">
@@ -120,7 +111,9 @@ export default async function DashboardPage() {
               </div>
             </div>
           </div>
-        ) : (
+        )}
+
+        {!isEmpty && (
           /* Populated State: Display a grid of previously created projects with links and options */
           <div className="flex flex-col gap-6">
             <div className="flex items-center justify-between">

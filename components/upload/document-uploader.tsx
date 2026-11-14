@@ -5,14 +5,11 @@ import { useState, useRef, useEffect } from "react"
 import { useShallow } from "zustand/react/shallow"
 import {
   UploadCloud,
-  FileText,
   AlertTriangle,
   AlertCircle,
   Loader2,
   CheckCircle2,
-  Clock,
   Sparkles,
-  Lock,
   FileUp,
   Trash2,
   RotateCcw,
@@ -37,7 +34,6 @@ type UploadStatus = "idle" | "uploading" | "processing" | "indexed" | "failed"
 
 export function DocumentUploader({
   projectId,
-  currentDocCount = 0,
   onUploadSuccess,
   className = "",
   largeDropzone = false,
@@ -54,12 +50,9 @@ export function DocumentUploader({
   const activeChannelRef = useRef<RealtimeChannel | null>(null)
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null)
 
-  const { documents, setDocuments } = useChatStore(useShallow(state => ({
-    documents: state.documents,
+  const { setDocuments } = useChatStore(useShallow(state => ({
     setDocuments: state.setDocuments,
   })))
-  const activeCount = currentDocCount || documents.filter((d) => d.status !== "failed").length
-  const isQuotaReached = activeCount >= 10
 
   // Cleanup realtime subscription and polling timer on unmount
   useEffect(() => {
@@ -77,7 +70,7 @@ export function DocumentUploader({
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (!isQuotaReached && status === "idle") {
+    if (status === "idle") {
       setIsDragging(true)
     }
   }
@@ -92,7 +85,7 @@ export function DocumentUploader({
     e.preventDefault()
     e.stopPropagation()
     setIsDragging(false)
-    if (isQuotaReached || status !== "idle") return
+    if (status !== "idle") return
 
     const files = e.dataTransfer.files
     if (files && files.length > 0) {
@@ -161,12 +154,6 @@ export function DocumentUploader({
     if (file.size > 25 * 1024 * 1024) {
       setStatus("failed")
       setErrorMessage("File exceeds the maximum allowable size of 25MB.")
-      return
-    }
-
-    if (isQuotaReached) {
-      setStatus("failed")
-      setErrorMessage("Project document quota reached (maximum 10 documents).")
       return
     }
 
@@ -332,7 +319,7 @@ export function DocumentUploader({
         accept=".pdf,.txt,.html"
         onChange={handleFileInputChange}
         className="hidden"
-        disabled={isQuotaReached || status === "uploading" || status === "processing"}
+        disabled={status === "uploading" || status === "processing"}
       />
 
       {/* Soft Free-Tier Processing Warning Banner */}
@@ -353,15 +340,13 @@ export function DocumentUploader({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           onClick={() => {
-            if (!isQuotaReached && status === "idle") {
+            if (status === "idle") {
               fileInputRef.current?.click()
             }
           }}
           className={`relative border-2 border-dashed rounded-2xl p-8 md:p-12 flex flex-col items-center justify-center text-center transition-all cursor-pointer w-full max-w-xl mx-auto shadow-sm ${
             isDragging
               ? "border-primary bg-primary/10 scale-[1.01]"
-              : isQuotaReached
-              ? "border-zinc-200 dark:border-zinc-800 bg-zinc-100/30 dark:bg-zinc-900/20 cursor-not-allowed opacity-75"
               : status === "failed"
               ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
               : "border-zinc-300 dark:border-zinc-700 hover:border-primary/60 hover:bg-zinc-50/80 dark:hover:bg-zinc-900/60 bg-white/60 dark:bg-zinc-900/40"
@@ -447,16 +432,6 @@ export function DocumentUploader({
               <div className="text-sm font-semibold">Document Fully Indexed!</div>
               <p className="text-xs text-muted-foreground">{statusText}</p>
             </div>
-          ) : isQuotaReached ? (
-            <div className="flex flex-col items-center gap-2 py-4 text-muted-foreground">
-              <FileText className="size-8 text-zinc-400 mb-1" />
-              <span className="text-sm font-medium text-foreground">
-                Document Quota Reached
-              </span>
-              <span className="text-xs">
-                10/10 files indexed. Delete a document to upload new specs.
-              </span>
-            </div>
           ) : (
             <div className="flex flex-col items-center gap-3 py-2">
               <div className="size-16 rounded-2xl bg-primary/10 border border-primary/20 text-primary flex items-center justify-center mb-1 shadow-xs">
@@ -507,15 +482,13 @@ export function DocumentUploader({
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
           onClick={() => {
-            if (!isQuotaReached && status === "idle") {
+            if (status === "idle") {
               fileInputRef.current?.click()
             }
           }}
           className={`relative border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center text-center transition-all cursor-pointer ${
             isDragging
               ? "border-primary bg-primary/5 scale-[0.99]"
-              : isQuotaReached
-              ? "border-zinc-200 dark:border-zinc-800 bg-zinc-100/30 dark:bg-zinc-900/20 cursor-not-allowed opacity-75"
               : status === "failed"
               ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
               : "border-zinc-200 dark:border-zinc-800 hover:border-primary/50 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 bg-white/40 dark:bg-zinc-950/40"
@@ -592,16 +565,6 @@ export function DocumentUploader({
               <CheckCircle2 className="size-6" />
               <div className="text-xs font-medium">Document Fully Indexed!</div>
               <p className="text-[10px] text-muted-foreground">{statusText}</p>
-            </div>
-          ) : isQuotaReached ? (
-            <div className="flex flex-col items-center gap-1 py-1 text-muted-foreground">
-              <FileText className="size-5 text-zinc-400 mb-1" />
-              <span className="text-xs font-medium text-foreground">
-                Document Quota Reached
-              </span>
-              <span className="text-[10px]">
-                10/10 files indexed. Delete a document to upload new specs.
-              </span>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-1 py-1">

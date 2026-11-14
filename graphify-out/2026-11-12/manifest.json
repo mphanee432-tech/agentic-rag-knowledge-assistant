@@ -12,9 +12,9 @@
     "semantic_hash": "a1d62d85893ba2bca1f33e962db7b87e"
   },
   "app/api/chat/route.ts": {
-    "mtime": 1794211664.108342,
-    "seen": 1794233345.6733174,
-    "ast_hash": "bee06587934357c7fc2f93ab2eeff739",
+    "mtime": 1794455626.0582755,
+    "seen": 1794468211.298532,
+    "ast_hash": "c65735b21beebb1027adb938463c7a6b",
     "semantic_hash": ""
   },
   "app/api/documents/route.ts": {
@@ -60,16 +60,16 @@
     "semantic_hash": "6587e5036bfa9c571538d9c55195e29e"
   },
   "app/page.tsx": {
-    "mtime": 1793166224.2272062,
-    "seen": 1793762314.4153216,
-    "ast_hash": "472939a2787dbba99177b2a9a977993d",
-    "semantic_hash": "472939a2787dbba99177b2a9a977993d"
+    "mtime": 1794455625.773606,
+    "seen": 1794468211.298604,
+    "ast_hash": "60ae53187a03ac7b9766980f1d8b3f8f",
+    "semantic_hash": ""
   },
   "app/project/[id]/page.tsx": {
-    "mtime": 1793166224.2292204,
-    "seen": 1793762314.4153247,
-    "ast_hash": "5369069b42ca93c6c0b26775ef6677d6",
-    "semantic_hash": "5369069b42ca93c6c0b26775ef6677d6"
+    "mtime": 1794455625.469172,
+    "seen": 1794468211.298612,
+    "ast_hash": "18db14e3e5f88ce4c3f4449014b17c07",
+    "semantic_hash": ""
   },
   "components.json": {
     "mtime": 1792234416.6241355,
@@ -78,10 +78,10 @@
     "semantic_hash": "3d2b9db30040c237fd258aed2f05f269"
   },
   "components/chat/chat-container.tsx": {
-    "mtime": 1793166224.2292204,
-    "seen": 1793762314.4153297,
-    "ast_hash": "9b0a173aa2c433d3811a9ba202856656",
-    "semantic_hash": "9b0a173aa2c433d3811a9ba202856656"
+    "mtime": 1794455212.2389288,
+    "seen": 1794455611.6649446,
+    "ast_hash": "3d96d73b4294ac1ffd38413f5a37f559",
+    "semantic_hash": ""
   },
   "components/chat/chat-input.tsx": {
     "mtime": 1792321233.3866985,
@@ -120,9 +120,9 @@
     "semantic_hash": ""
   },
   "components/chat/project-workspace-client.tsx": {
-    "mtime": 1793782945.506184,
-    "seen": 1793783185.7505813,
-    "ast_hash": "f66ce1db5ba22d408166ca3120fdeab2",
+    "mtime": 1794455211.810901,
+    "seen": 1794455611.664961,
+    "ast_hash": "11d0894c24ac8ca4ab26d3254126953f",
     "semantic_hash": ""
   },
   "components/chat/sidebar.tsx": {
@@ -216,15 +216,15 @@
     "semantic_hash": "dfa1f5f6a7037bf39dc510f30b180002"
   },
   "lib/auth.ts": {
-    "mtime": 1793166064.1894443,
-    "seen": 1793762314.415385,
-    "ast_hash": "d7991e53b44b897f838f61b311b2e43a",
-    "semantic_hash": "d7991e53b44b897f838f61b311b2e43a"
+    "mtime": 1794455124.1694818,
+    "seen": 1794455611.6649969,
+    "ast_hash": "98ba0780c30066e75aa150810ef79016",
+    "semantic_hash": ""
   },
   "lib/chat-contract.ts": {
-    "mtime": 1793804858.194139,
-    "seen": 1793805002.2044992,
-    "ast_hash": "49f378852ab9d4f7af7656cd87255c72",
+    "mtime": 1794455142.8308313,
+    "seen": 1794455611.6649988,
+    "ast_hash": "619d2aea32347809572eece81a3aeb42",
     "semantic_hash": ""
   },
   "lib/chat-input.ts": {
@@ -240,10 +240,10 @@
     "semantic_hash": ""
   },
   "lib/prompts/systemPrompt.ts": {
-    "mtime": 1793166224.2387092,
-    "seen": 1793762314.4153945,
-    "ast_hash": "3ca898de7d80a0be248baa7d7d4cd637",
-    "semantic_hash": "3ca898de7d80a0be248baa7d7d4cd637"
+    "mtime": 1794455143.8674586,
+    "seen": 1794455611.6650116,
+    "ast_hash": "ddcf6a853835f57acd812c4bb27f65f1",
+    "semantic_hash": ""
   },
   "lib/send-chat.ts": {
     "mtime": 1793804742.8448622,
@@ -330,15 +330,15 @@
     "semantic_hash": ""
   },
   "lib/citations.ts": {
-    "mtime": 1793794566.92032,
-    "seen": 1793794638.945105,
-    "ast_hash": "a18db1f766065c77af7a087fe4e8be5b",
+    "mtime": 1794455142.497494,
+    "seen": 1794455611.6650052,
+    "ast_hash": "5c0f553f066652d4a428b4fd54c1535c",
     "semantic_hash": ""
   },
   "lib/retrieve-chunks.ts": {
-    "mtime": 1794145509.2584229,
-    "seen": 1794233345.6739647,
-    "ast_hash": "e91be8b0c4ba277d2f91b474b70ca1ed",
+    "mtime": 1794455505.660835,
+    "seen": 1794455611.665014,
+    "ast_hash": "4368e96f5550e88adbe17096c19f670f",
     "semantic_hash": ""
   },
   "lib/with-timeout.ts": {

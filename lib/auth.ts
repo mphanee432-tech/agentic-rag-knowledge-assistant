@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js"
+import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { createServerClient } from "@/lib/supabase/server"
 
 export class HttpError extends Error {
@@ -15,6 +15,17 @@ export async function requireUser(req?: Request) {
   const { data: { user }, error } = await supabase.auth.getUser(token)
   if (error || !user) throw new HttpError(401, "Sign in to continue.")
   return { supabase, user }
+}
+
+export async function getEnterpriseCopilotContext(supabase: SupabaseClient, organizationId?: string) {
+  const { data, error } = await supabase.rpc("enterprise_copilot_context", {
+    target_organization_id: organizationId ?? null,
+  }).maybeSingle<{ organization_id: string; can_upload_policy: boolean }>()
+  // The original Personal RAG database has no enterprise functions.
+  if (error && !(organizationId === undefined && ["PGRST202", "42883"].includes(error.code))) {
+    throw new HttpError(500, "Unable to load enterprise access.")
+  }
+  return data
 }
 async function findOwnedProject(auth: Awaited<ReturnType<typeof requireUser>>, projectId: unknown) {
   if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) {
@@ -40,6 +51,19 @@ export async function requireChatProject(projectId: string, req?: Request) {
   if (error) throw new HttpError(500, "Unable to load project.")
   if (!data) throw new HttpError(404, "Project not found.")
   return { ...auth, project: data, enterprise: true }
+}
+export async function requireEnterpriseUploader(projectId: string, req?: Request) {
+  const auth = await requireUser(req)
+  if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) {
+    throw new HttpError(400, "A valid project ID is required.")
+  }
+  const { data: canUpload, error } = await auth.supabase.rpc("can_upload_enterprise_policy", {
+    p_project_id: projectId,
+  })
+  if (error || !canUpload) {
+    throw new HttpError(403, "Enterprise upload authorization denied.")
+  }
+  return auth
 }
 export function apiError(error: unknown) {
   if (error instanceof HttpError) return Response.json({ error: error.message }, { status: error.status })

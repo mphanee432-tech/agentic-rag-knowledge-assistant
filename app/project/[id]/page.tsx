@@ -14,10 +14,11 @@ export default async function ProjectWorkspacePage({ params }: ProjectPageProps)
     notFound()
   }
 
-  const { project, enterprise } = await requireChatProject(id).catch((error: unknown) => {
+  const { project, enterprise, user } = await requireChatProject(id).catch((error: unknown) => {
     if (error instanceof HttpError && error.status === 401) redirect("/login")
     if (error instanceof HttpError && (error.status === 400 || error.status === 404)) notFound()
     throw error
   })
-  return <ProjectWorkspaceClient projectId={project.id} projectName={project.name} enterprise={enterprise} />
+  if (enterprise) redirect("/")
+  return <ProjectWorkspaceClient userId={user.id} projectId={project.id} projectName={project.name} />
 }

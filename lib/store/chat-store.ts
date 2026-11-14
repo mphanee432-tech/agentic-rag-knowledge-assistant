@@ -21,6 +21,7 @@ export interface ChatMessage {
   role: "user" | "assistant"
   content: string
   citations?: Citation[]
+  fallbackQuestions?: string[]
   interactionId?: string
 }
 
@@ -35,6 +36,8 @@ export interface DocumentItem {
 }
 
 interface ChatStore {
+  accountId: string | null
+  setAccount: (accountId: string | null) => void
   messages: ChatMessage[]
   activeProjectId: string | null
   isLoading: boolean
@@ -58,6 +61,11 @@ interface ChatStore {
 }
 
 export const useChatStore = create<ChatStore>((set) => ({
+  accountId: null,
+  setAccount: (accountId) => set(state => state.accountId === accountId ? state : {
+    accountId, activeProjectId: null, messages: [], documents: [], suggestedQueries: [],
+    isLoading: false, statusMessage: null, isDocumentsLoading: true,
+  }),
   messages: [],
   activeProjectId: null,
   isLoading: false,

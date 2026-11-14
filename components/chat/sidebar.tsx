@@ -74,9 +74,6 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
     }
   }
 
-  const activeDocCount = documents.filter((d) => d.status !== "failed").length
-  const quotaPercent = Math.min((activeDocCount / 10) * 100, 100)
-
   return (
     <aside className="w-80 border-r border-zinc-200 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-950/50 flex flex-col h-full shrink-0">
       {/* Workspace Header */}
@@ -124,30 +121,6 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
           </select>
         </div>
       )}
-
-      {/* Document Quota Indicator */}
-      <div className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800/60 bg-zinc-100/40 dark:bg-zinc-900/30">
-        <div className="flex items-center justify-between text-[11px] mb-1.5">
-          <span className="font-medium text-zinc-700 dark:text-zinc-300">
-            Document Quota
-          </span>
-          <span className="font-mono text-zinc-500">
-            {activeDocCount} / 10 files
-          </span>
-        </div>
-        <div className="w-full bg-zinc-200 dark:bg-zinc-800 h-1.5 rounded-full overflow-hidden">
-          <div
-            className={`h-full transition-all duration-300 ${
-              activeDocCount >= 10
-                ? "bg-rose-500"
-                : activeDocCount >= 8
-                ? "bg-amber-500"
-                : "bg-primary"
-            }`}
-            style={{ width: `${quotaPercent}%` }}
-          />
-        </div>
-      </div>
 
       {deleteError && <p role="alert" className="p-3 text-xs text-red-600">{deleteError}</p>}
       {/* Indexed Document List */}
@@ -208,7 +181,6 @@ export function Sidebar({ projectId, projectName }: SidebarProps) {
       <div className="p-3 border-t border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900/40">
         <DocumentUploader
           projectId={effectiveProjectId || ""}
-          currentDocCount={activeDocCount}
           onUploadSuccess={() => {
             if (effectiveProjectId) {
               void loadWorkspace(effectiveProjectId)

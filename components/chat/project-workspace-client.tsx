@@ -6,33 +6,38 @@ import { Sidebar } from "@/components/chat/sidebar"
 import { ChatContainer } from "@/components/chat/chat-container"
 import { useChatStore } from "@/lib/store/chat-store"
 
-interface ProjectWorkspaceClientProps {
-  projectId: string
-  projectName?: string | null
-  enterprise?: boolean
-}
+type ProjectWorkspaceClientProps = {
+  userId: string
+} & (
+  | { projectId: string; projectName?: string | null; organizationId?: never; canUploadPolicy?: never }
+  | { organizationId: string; canUploadPolicy: boolean; projectId?: never; projectName?: never }
+)
 
 export function ProjectWorkspaceClient({
+  userId,
   projectId,
   projectName,
-  enterprise,
+  organizationId,
+  canUploadPolicy,
 }: ProjectWorkspaceClientProps) {
+  const accountId = useChatStore(state => state.accountId)
   const activeProjectId = useChatStore(state => state.activeProjectId)
-  const setActiveProject = useChatStore(state => state.setActiveProject)
+  const chatScope = projectId ?? `organization:${organizationId}`
 
   // Sidebar owns workspace loading once the route's project is active.
   React.useEffect(() => {
-    if (projectId && activeProjectId !== projectId) setActiveProject(projectId)
-  }, [projectId, activeProjectId, setActiveProject])
+    useChatStore.getState().setAccount(userId)
+    if (useChatStore.getState().activeProjectId !== chatScope) useChatStore.getState().setActiveProject(chatScope)
+  }, [userId, chatScope])
 
   const handleSelectSuggestion = (query: string) => sendChat(query, projectId)
 
-  if (activeProjectId !== projectId) return <main aria-busy="true" className="p-6">Loading workspace…</main>
+  if (accountId !== userId || activeProjectId !== chatScope) return <main aria-busy="true" className="p-6">Loading chat…</main>
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans">
       {/* Left Sidebar: Document Quota & Repository Sources with strict tenant id */}
-      {!enterprise && <Sidebar
+      {projectId && <Sidebar
         onSelectSuggestion={handleSelectSuggestion}
         projectId={projectId}
         projectName={projectName}
@@ -42,7 +47,8 @@ export function ProjectWorkspaceClient({
       <ChatContainer
         projectId={projectId}
         projectName={projectName}
-        enterprise={enterprise}
+        organizationId={organizationId}
+        canUploadPolicy={canUploadPolicy}
       />
     </div>
   )

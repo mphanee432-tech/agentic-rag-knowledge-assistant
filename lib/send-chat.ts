@@ -1,11 +1,12 @@
 "use client"
-import { readChatStream } from "@/lib/chat-contract"
+import { ENTERPRISE_NO_EVIDENCE, readChatStream } from "@/lib/chat-contract"
 import { useChatStore, type Citation } from "@/lib/store/chat-store"
 
-export async function sendChat(query: string, projectId: string | null | undefined) {
+export async function sendChat(query: string, projectId: string | null | undefined, organizationId?: string) {
   const store = useChatStore.getState()
-  if (!projectId || !query.trim() || store.isLoading || store.activeProjectId !== projectId) return
-  const history = store.messages.slice(-8).map(({ role, content }) => ({ role, content }))
+  const chatScope = organizationId ? `organization:${organizationId}` : projectId
+  if (!chatScope || !query.trim() || store.isLoading || store.activeProjectId !== chatScope) return
+  const history = organizationId ? [] : store.messages.slice(-8).map(({ role, content }) => ({ role, content }))
   const messageId = crypto.randomUUID()
   store.addMessage({ id: crypto.randomUUID(), role: "user", content: query })
   store.addMessage({ id: messageId, role: "assistant", content: "", citations: [] })
@@ -13,20 +14,24 @@ export async function sendChat(query: string, projectId: string | null | undefin
   store.setStatusMessage("Searching your documents…")
   const current = () => {
     const state = useChatStore.getState()
-    return state.activeProjectId === projectId && state.messages.some(m => m.id === messageId)
+    return state.activeProjectId === chatScope && state.messages.some(m => m.id === messageId)
   }
   let text = ""
   let citations: Citation[] = []
   let interactionId: string | undefined
+  let fallbackQuestions: string[] | undefined
   const update = () => {
     if (current()) useChatStore.setState(state => ({
-      messages: state.messages.map(m => m.id === messageId ? { ...m, content: text, citations, interactionId } : m),
+      messages: state.messages.map(m => m.id === messageId ? {
+        ...m, content: text, citations, interactionId,
+        ...(organizationId && text === ENTERPRISE_NO_EVIDENCE && fallbackQuestions?.length ? { fallbackQuestions } : {}),
+      } : m),
     }))
   }
   try {
     const response = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectId, query, messages: history, stream: true }),
+      body: JSON.stringify({ ...(organizationId ? { organizationId } : { projectId }), query, messages: history, stream: true }),
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
@@ -35,7 +40,11 @@ export async function sendChat(query: string, projectId: string | null | undefin
     await readChatStream(response, event => {
       if (event.type === "metadata") { citations = event.citations; interactionId = event.interactionId }
       if (event.type === "text") { text += event.text; update() }
+      if (event.type === "finish") fallbackQuestions = event.fallbackQuestions
     })
+    if (!text.trim()) {
+      throw new Error("The answer could not be completed. Please retry.")
+    }
     update()
   } catch (error) {
     text = error instanceof Error ? `Error: ${error.message}` : "Unable to complete the answer."

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { POST } from "../app/api/chat/route"
-import { MAX_ANSWER_CHARS, NO_EVIDENCE, readChatStream, type ChatEvent } from "../lib/chat-contract"
+import { ENTERPRISE_NO_EVIDENCE, MAX_ANSWER_CHARS, NO_EVIDENCE, readChatStream, type ChatEvent } from "../lib/chat-contract"
 
 test("chat only persists and completes verified answers in JSON and SSE modes", async t => {
   const env = {
@@ -154,7 +154,7 @@ test("chat only persists and completes verified answers in JSON and SSE modes", 
   }
 })
 
-test("enterprise chat releases only freshly authorized, cited evidence", async t => {
+test("organization chat releases only freshly authorized, cited evidence", async t => {
   const env = {
     NEXT_PUBLIC_SUPABASE_URL: "https://enterprise-test.invalid",
     NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon",
@@ -168,7 +168,7 @@ test("enterprise chat releases only freshly authorized, cited evidence", async t
       else process.env[key] = value
     }
   })
-  const projectId = "11111111-1111-4111-8111-111111111111"
+  const organizationId = "11111111-1111-4111-8111-111111111111"
   const userId = "22222222-2222-4222-8222-222222222222"
   const chunkId = "33333333-3333-4333-8333-333333333333"
   const cases = [
@@ -177,8 +177,11 @@ test("enterprise chat releases only freshly authorized, cited evidence", async t
     { name: "revoked before SSE release", stream: true, revoked: true },
     { name: "revoked before JSON release", stream: false, revoked: true },
     { name: "invalid citation", stream: true, invalid: true },
+    { name: "model refuses without citation", stream: true, refusal: ENTERPRISE_NO_EVIDENCE },
+    { name: "model refuses with citation", stream: true, refusal: `${ENTERPRISE_NO_EVIDENCE} [Chunk 1]` },
     { name: "no authorized evidence", stream: true, empty: true },
-    { name: "unauthorized project", stream: true, denied: true },
+    { name: "suggestion authorization unavailable", stream: false, empty: true, unavailable: true },
+    { name: "unauthorized organization", stream: true, denied: true },
   ]
   for (const scenario of cases) await t.test(scenario.name, async st => {
     const calls: string[] = []
@@ -190,26 +193,39 @@ test("enterprise chat releases only freshly authorized, cited evidence", async t
         switch (url.pathname) {
           case "/auth/v1/user":
             return Response.json({ id: userId, aud: "authenticated", role: "authenticated" })
-          case "/rest/v1/projects":
-            return Response.json([])
-          case "/rest/v1/rpc/enterprise_chat_projects":
-            assert.deepEqual(JSON.parse(String(init?.body)), { target_project_id: projectId })
-            return Response.json(scenario.denied ? [] : [{ id: projectId, name: "Shared" }])
-          case "/rest/v1/rpc/search_rag_chunks":
+          case "/rest/v1/rpc/enterprise_copilot_context":
+            assert.deepEqual(JSON.parse(String(init?.body)), { target_organization_id: organizationId })
+            return Response.json(scenario.denied ? [] : [{ organization_id: organizationId, can_upload_policy: false }])
+          case "/rest/v1/rpc/search_enterprise_chunks":
             assert.equal(url.searchParams.get("select"), "id,content")
+            assert.equal(JSON.parse(String(init?.body)).target_organization_id, organizationId)
             return Response.json(scenario.empty ? [] : [{ id: chunkId, content: "Authorized evidence", metadata: { filename: "private.pdf" } }])
-          case "/rest/v1/rpc/rag_chunks_still_visible":
-            assert.deepEqual(JSON.parse(String(init?.body)), { target_project_id: projectId, chunk_ids: [chunkId] })
+          case "/rest/v1/rpc/enterprise_chunks_still_visible":
+            assert.deepEqual(JSON.parse(String(init?.body)), { target_organization_id: organizationId, chunk_ids: [chunkId] })
             return Response.json(!scenario.revoked)
+          case "/rest/v1/rpc/enterprise_fallback_documents":
+            assert.deepEqual(JSON.parse(String(init?.body)), { target_organization_id: organizationId })
+            if (scenario.unavailable) return Response.json({ code: "PGRST202" }, { status: 404 })
+            return Response.json([
+              { code: "D07", own_department: true },
+              { code: "D01", own_department: false },
+              { code: "D02", own_department: false },
+              { code: "D08", own_department: false },
+              { code: "D03", own_department: true },
+              { code: "D11", own_department: true },
+              { code: "D12", own_department: true },
+            ])
         }
       }
       if (url.pathname.endsWith(":batchEmbedContents")) {
         return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
       }
       if (/:streamGenerateContent$|:generateContent$/.test(url.pathname)) {
+        assert.ok(url.pathname.includes("/models/gemini-3.5-flash-lite:"))
         assert.match(String(init?.body), /Authorized evidence/)
+        assert.match(String(init?.body), /I don't know based on the documents I can access\./)
         assert.doesNotMatch(String(init?.body), /Old revoked answer|private\.pdf/)
-        const text = scenario.invalid ? "Unverified output [Chunk 99]." : "Use the documented setting [Chunk 1]."
+        const text = scenario.refusal ?? (scenario.invalid ? "Unverified output [Chunk 99]." : "Use the documented setting [Chunk 1].")
         const data = { candidates: [{ index: 0, content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
           usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 } }
         return scenario.stream
@@ -220,17 +236,23 @@ test("enterprise chat releases only freshly authorized, cited evidence", async t
     })
     const response = await POST(new Request("https://app.invalid/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer employee-token", "x-eval-mode": "true" },
-      body: JSON.stringify({ projectId, query: "Question", stream: scenario.stream,
+      body: JSON.stringify({ organizationId, query: "Question", stream: scenario.stream,
         messages: [{ role: "assistant", content: "Old revoked answer" }] }),
     }))
     if (scenario.denied) {
       assert.equal(response.status, 404)
-      assert.equal(calls.length, 3)
+      assert.deepEqual(calls, ["/auth/v1/user", "/rest/v1/rpc/enterprise_copilot_context"])
       return
     }
     assert.equal(response.status, 200)
     assert.equal(response.headers.get("x-interaction-id"), null)
-    const expected = scenario.answer ?? NO_EVIDENCE
+    const expected = scenario.answer ?? ENTERPRISE_NO_EVIDENCE
+    const expectedQuestions = scenario.answer || scenario.unavailable ? undefined : [
+      "What does the Design Handoff and Accessibility Standard require for handoff to Engineering?",
+      "What are the general employee responsibilities in the Employee Handbook?",
+      "How do I request leave under the Leave and Attendance Policy?",
+      "How do I submit an equipment or service request?",
+    ]
     if (scenario.stream) {
       const events: ChatEvent[] = []
       const wire = response.clone().text()
@@ -240,16 +262,19 @@ test("enterprise chat releases only freshly authorized, cited evidence", async t
       assert.equal(metadata.interactionId, undefined)
       assert.deepEqual(metadata.citations.map(c => c.id), scenario.answer ? [chunkId] : [])
       assert.equal(events.filter(event => event.type === "text").map(event => event.text).join(""), expected)
+      assert.deepEqual(events.find(event => event.type === "finish")?.fallbackQuestions, expectedQuestions)
       assert.doesNotMatch(await wire, /Old revoked answer|private\.pdf|Chunk 99/)
       if (!scenario.answer) assert.doesNotMatch(await wire, /Authorized evidence/)
     } else {
       const body = await response.json()
       assert.equal(body.text, expected)
+      assert.deepEqual(body.fallbackQuestions, expectedQuestions)
       assert.deepEqual(body.citations.map((c: { id: string }) => c.id), scenario.answer ? [chunkId] : [])
       if (!scenario.answer) assert.equal(body.context, "")
     }
     assert.equal(calls.some(path => path.endsWith("/interactions")), false)
-    assert.equal(calls.some(path => path.endsWith("/rag_chunks_still_visible")), !scenario.invalid && !scenario.empty)
+    assert.equal(calls.some(path => path.endsWith("/enterprise_fallback_documents")), !scenario.answer)
+    assert.equal(calls.some(path => path.endsWith("/enterprise_chunks_still_visible")), !scenario.invalid && !scenario.empty && !scenario.refusal)
     if (scenario.empty) assert.ok(!calls.some(path => /:streamGenerateContent$|:generateContent$/.test(path)))
   })
 })

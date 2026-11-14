@@ -12,7 +12,16 @@ export async function proxy(request: NextRequest) {
       },
     },
   })
-  await supabase.auth.getUser()
+  const code = request.nextUrl.searchParams.get("code")
+  const tokenHash = request.nextUrl.searchParams.get("token_hash")
+  const type = request.nextUrl.searchParams.get("type")
+  if (code) {
+    await supabase.auth.exchangeCodeForSession(code)
+  } else if (tokenHash && (type === "signup" || type === "email")) {
+    await supabase.auth.verifyOtp({ token_hash: tokenHash, type })
+  } else {
+    await supabase.auth.getUser()
+  }
   return response
 }
 export const config = { matcher: ["/", "/project/:path*", "/login"] }

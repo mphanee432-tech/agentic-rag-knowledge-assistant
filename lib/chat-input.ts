@@ -4,7 +4,18 @@ export function parseChatInput(value: unknown) {
   const body = value as Record<string, unknown>
   const vars = body.vars && typeof body.vars === "object" ? body.vars as Record<string, unknown> : {}
   const projectId = body.projectId || vars.projectId || body.project_id || vars.project_id
-  if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) throw new Error("A valid project ID is required.")
+  const organizationId = body.organizationId
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
+  let scope: { projectId: string; organizationId: null } | { projectId: null; organizationId: string }
+  if (organizationId === undefined) {
+    if (typeof projectId !== "string" || !uuid.test(projectId)) throw new Error("A valid project ID is required.")
+    scope = { projectId, organizationId: null }
+  } else {
+    if (projectId != null || typeof organizationId !== "string" || !uuid.test(organizationId)) {
+      throw new Error("A valid organization ID without a project ID is required.")
+    }
+    scope = { projectId: null, organizationId }
+  }
   const messages: ChatMessageInput[] = []
   for (const item of (Array.isArray(body.messages) ? body.messages.slice(-9) : [])) {
     if (!item || typeof item !== "object") continue
@@ -18,7 +29,7 @@ export function parseChatInput(value: unknown) {
   const userQuery = query.trim()
   if (last?.role !== "user" || last.content !== userQuery) messages.push({ role: "user", content: userQuery })
   const variant = body.promptVariant || vars.promptVariant
-  return { projectId, userQuery, boundedHistory: messages.slice(-10),
+  return { ...scope, userQuery, boundedHistory: messages.slice(-10),
     promptVariant: typeof variant === "string" ? variant : "strict",
     isEvalMode: body.stream === false || body.stream === "false",
     wantsStream: body.stream === true || body.stream === "true" }
