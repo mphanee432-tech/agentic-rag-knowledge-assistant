@@ -41,20 +41,39 @@ async function completeDemoOnboarding(department: DemoDepartment) {
 
 export default function LoginPage() {
   const router = useRouter()
-  const [mode, setMode] = useState<"signin" | "signup">("signin")
+  const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin")
   const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
   const [pending, setPending] = useState(false)
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setPending(true)
     setError("")
+    setNotice("")
     const form = new FormData(event.currentTarget)
     const email = String(form.get("email") ?? "").trim()
     const password = String(form.get("password") ?? "")
     const supabase = createBrowserClient()
 
     try {
+      if (mode === "forgot") {
+        if (!email) {
+          setError("Please enter your email address.")
+          return
+        }
+        const redirectTo = `${window.location.origin}/reset-password`
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+          redirectTo,
+        })
+        if (resetError && resetError.status === 429) {
+          setError("Too many reset requests. Please wait a moment and try again.")
+          return
+        }
+        setNotice("If an account exists for that email, we have sent a password reset link. Please check your inbox.")
+        return
+      }
+
       if (mode === "signin") {
         const { data, error: signInError } = await supabase.auth.signInWithPassword({
           email,
@@ -109,7 +128,9 @@ export default function LoginPage() {
           ? err.message
           : mode === "signin"
             ? "Sign-in is unavailable. Please retry."
-            : "Sign-up is unavailable. Please retry.",
+            : mode === "forgot"
+              ? "Password reset is unavailable. Please retry."
+              : "Sign-up is unavailable. Please retry.",
       )
     } finally {
       setPending(false)
@@ -125,6 +146,7 @@ export default function LoginPage() {
             onClick={() => {
               setMode("signin")
               setError("")
+              setNotice("")
             }}
             className={`flex-1 py-2 text-sm font-medium ${
               mode === "signin" ? "bg-primary text-primary-foreground" : "bg-background"
@@ -137,6 +159,7 @@ export default function LoginPage() {
             onClick={() => {
               setMode("signup")
               setError("")
+              setNotice("")
             }}
             className={`flex-1 py-2 text-sm font-medium ${
               mode === "signup" ? "bg-primary text-primary-foreground" : "bg-background"
@@ -149,7 +172,9 @@ export default function LoginPage() {
         <h1 className="text-2xl font-semibold">
           {mode === "signin"
             ? "Sign in to Knowledge Assistant"
-            : "Sign up for Knowledge Assistant"}
+            : mode === "forgot"
+              ? "Reset your password"
+              : "Sign up for Knowledge Assistant"}
         </h1>
 
         <label className="block">
@@ -163,17 +188,35 @@ export default function LoginPage() {
           />
         </label>
 
-        <label className="block">
-          Password
-          <input
-            className="block w-full border rounded p-2"
-            name="password"
-            type="password"
-            autoComplete={mode === "signin" ? "current-password" : "new-password"}
-            minLength={6}
-            required
-          />
-        </label>
+        {mode !== "forgot" && (
+          <label className="block">
+            Password
+            <input
+              className="block w-full border rounded p-2"
+              name="password"
+              type="password"
+              autoComplete={mode === "signin" ? "current-password" : "new-password"}
+              minLength={6}
+              required
+            />
+          </label>
+        )}
+
+        {mode === "signin" && (
+          <div className="text-right">
+            <button
+              type="button"
+              onClick={() => {
+                setMode("forgot")
+                setError("")
+                setNotice("")
+              }}
+              className="text-sm underline text-muted-foreground hover:text-foreground"
+            >
+              Forgot password?
+            </button>
+          </div>
+        )}
 
         {mode === "signup" && (
           <div className="space-y-1.5">
@@ -199,17 +242,37 @@ export default function LoginPage() {
           </div>
         )}
 
-        {error && <p role="alert">{error}</p>}
+        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {notice && <p role="status" className="text-sm text-foreground">{notice}</p>}
 
-        <button disabled={pending} className="border rounded px-4 py-2">
-          {mode === "signin"
-            ? pending
-              ? "Signing in…"
-              : "Sign in"
-            : pending
-              ? "Signing up…"
-              : "Sign Up"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button disabled={pending} className="border rounded px-4 py-2">
+            {mode === "signin"
+              ? pending
+                ? "Signing in…"
+                : "Sign in"
+              : mode === "forgot"
+                ? pending
+                  ? "Sending…"
+                  : "Send reset link"
+                : pending
+                  ? "Signing up…"
+                  : "Sign Up"}
+          </button>
+          {mode === "forgot" && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode("signin")
+                setError("")
+                setNotice("")
+              }}
+              className="text-sm underline text-muted-foreground hover:text-foreground"
+            >
+              Back to sign in
+            </button>
+          )}
+        </div>
       </form>
     </main>
   )
