@@ -15,15 +15,24 @@ if (fs.existsSync(testEnvPath)) {
   }
 }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+const supabaseUrl = requireEnv('NEXT_PUBLIC_SUPABASE_URL');
+const anonKey = requireEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY');
+const serviceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 
 const employeeEmail = 'wp5.test.employee@deccanbridge.invalid';
-const employeePass = 'DemoEmployeePass123!';
+const employeePass = requireEnv('WP5_EMPLOYEE_PASSWORD');
 
 const uploaderEmail = process.env.EVAL_TEST_EMAIL || 'phani9119@gmail.com';
-const uploaderPass = process.env.EVAL_TEST_PASSWORD || 'Phani#345';
+const uploaderPass = requireEnv('EVAL_TEST_PASSWORD');
+const ownerAPass = requireEnv('WP5_OWNER_A_PASSWORD');
 
 const organizationId = 'c0000000-0000-4000-8000-000000000001';
 const departmentId = 'c0000000-0000-4000-8000-000000000002';
@@ -331,7 +340,7 @@ async function main() {
     // Synthetic personal owner A from fixtures
     const ownerAJwtRes = await empClient.auth.signInWithPassword({
       email: 'owner-a@wp2a-fixture.invalid',
-      password: 'FixturePassword123!',
+      password: ownerAPass,
     });
     if (ownerAJwtRes.data.session) {
       const ownerAJwt = ownerAJwtRes.data.session.access_token;

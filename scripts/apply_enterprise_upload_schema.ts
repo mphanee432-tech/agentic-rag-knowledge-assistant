@@ -14,10 +14,19 @@ if (fs.existsSync(testEnvPath)) {
   throw new Error('Missing .env.test.local configuration');
 }
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+const supabaseUrl = requireEnv('NEXT_PUBLIC_SUPABASE_URL');
+const serviceRoleKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY');
 const uploaderEmail = process.env.EVAL_TEST_EMAIL || 'phani9119@gmail.com';
-const uploaderPassword = process.env.EVAL_TEST_PASSWORD || 'Phani#345';
+const uploaderPassword = requireEnv('EVAL_TEST_PASSWORD');
+const pgPassword = requireEnv('PGPASSWORD');
 
 if (!supabaseUrl.includes('cpowlkptvtnkjkulveph')) {
   throw new Error(`SAFETY ERROR: Expected test project cpowlkptvtnkjkulveph, got ${supabaseUrl}`);
@@ -209,7 +218,7 @@ COMMIT;
   console.log('Applying SQL to cpowlkptvtnkjkulveph...');
   const env = {
     ...process.env,
-    PGPASSWORD: 'fMJZ,M$2eq!,sM,',
+    PGPASSWORD: pgPassword,
   };
   const psqlArgs = [
     '-h', 'aws-1-ap-northeast-1.pooler.supabase.com',

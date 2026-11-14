@@ -6,11 +6,16 @@ import { execFileSync } from 'child_process';
 
 dotenv.config({ path: path.resolve(process.cwd(), '.env.local') });
 
-const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
-if (!apiKey) {
-  console.error('Missing GOOGLE_GENERATIVE_AI_API_KEY');
-  process.exit(1);
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || !value.trim()) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
 }
+
+const apiKey = requireEnv('GOOGLE_GENERATIVE_AI_API_KEY');
+const pgPassword = requireEnv('PGPASSWORD');
 
 const ai = new GoogleGenAI({ apiKey });
 
@@ -111,7 +116,7 @@ COMMIT;
   console.log('Applying fixtures to cpowlkptvtnkjkulveph via psql...');
   const env = {
     ...process.env,
-    PGPASSWORD: 'fMJZ,M$2eq!,sM,',
+    PGPASSWORD: pgPassword,
   };
   const psqlArgs = [
     'host=aws-1-ap-northeast-1.pooler.supabase.com port=5432 dbname=postgres user=postgres.cpowlkptvtnkjkulveph sslmode=verify-full sslrootcert=C:/Users/User/Downloads/prod-ca-2021.crt connect_timeout=15',
