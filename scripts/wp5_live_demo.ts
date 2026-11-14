@@ -31,7 +31,8 @@ export async function runWP5LiveDemo() {
   // 1 & 2: Sign in as test employee
   console.log('1 & 2. Signing in as test employee with published, indexed documents...');
   const employeeEmail = 'wp5.test.employee@deccanbridge.invalid';
-  const employeePassword = 'DemoEmployeePass123!';
+  const employeePassword = process.env.WP5_EMPLOYEE_PASSWORD;
+  if (!employeePassword) throw new Error('Missing WP5_EMPLOYEE_PASSWORD');
 
   const userClient = createClient(supabaseUrl, anonKey);
   const { data: sessionData, error: loginErr } = await userClient.auth.signInWithPassword({
