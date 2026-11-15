@@ -5,6 +5,14 @@ import { sendChat } from "@/lib/send-chat"
 import { useRef, useEffect } from "react"
 import { ENTERPRISE_NO_EVIDENCE } from "@/lib/chat-contract"
 import {
+  DEFAULT_JIRA_PROJECT_ID,
+  draftJiraTicket,
+  extractJiraStatusIssueKey,
+  JIRA_DESCRIPTION_MAX,
+  JIRA_SUMMARY_MAX,
+  type JiraFieldOptionsResponse,
+} from "@/lib/jira-ticket"
+import {
   RotateCcw,
   Lock,
   Building2,
@@ -14,6 +22,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { ChatMessages } from "@/components/chat/chat-messages"
 import { ChatInput } from "@/components/chat/chat-input"
 import { ThemeToggle } from "@/components/theme-toggle"
@@ -27,6 +36,15 @@ interface ChatContainerProps {
   projectName?: string | null
   organizationId?: string
   canUploadPolicy?: boolean
+}
+
+interface JiraTicketDraftState {
+  summary: string
+  description: string
+  projectId: string
+  issueTypeId: string
+  assigneeId: string
+  priorityId: string
 }
 
 export function ChatContainer({
@@ -46,6 +64,14 @@ export function ChatContainer({
 
   const enterprise = Boolean(organizationId)
   const [isUploadPolicyOpen, setIsUploadPolicyOpen] = React.useState(false)
+  const [jiraDraft, setJiraDraft] = React.useState<JiraTicketDraftState | null>(null)
+  const [jiraOptions, setJiraOptions] = React.useState<JiraFieldOptionsResponse | null>(null)
+  const [isLoadingJiraOptions, setIsLoadingJiraOptions] = React.useState(false)
+  const [jiraOptionsError, setJiraOptionsError] = React.useState("")
+  const [jiraError, setJiraError] = React.useState("")
+  const [isCreatingTicket, setIsCreatingTicket] = React.useState(false)
+  const creatingTicket = useRef(false)
+  const jiraOptionsRequestId = useRef(0)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -54,7 +80,203 @@ export function ChatContainer({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, statusMessage])
 
-  const handleSendMessage = (query: string) => sendChat(query, projectId, organizationId)
+  const lookupJiraStatus = async (query: string, issueKey: string) => {
+    if (!organizationId) return
+    const store = useChatStore.getState()
+    const { accountId, activeProjectId } = store
+    store.addMessage({ id: crypto.randomUUID(), role: "user", content: query })
+    store.setIsLoading(true)
+    store.setStatusMessage(`Checking Jira status for ${issueKey}…`)
+
+    const appendAssistantMessage = (content: string) => {
+      const current = useChatStore.getState()
+      if (current.accountId === accountId && current.activeProjectId === activeProjectId) {
+        current.addMessage({ id: crypto.randomUUID(), role: "assistant", content })
+      }
+    }
+
+    try {
+      const response = await fetch("/api/jira/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organizationId, issueKey }),
+      })
+      const result = await response.json().catch(() => null)
+      if (
+        !response.ok ||
+        typeof result?.ticketKey !== "string" ||
+        typeof result?.status !== "string" ||
+        typeof result?.summary !== "string"
+      ) {
+        appendAssistantMessage(
+          typeof result?.error === "string"
+            ? result.error
+            : `Unable to retrieve Jira status for ${issueKey}.`,
+        )
+        return
+      }
+
+      appendAssistantMessage(
+        `**${result.ticketKey} — ${result.status}**\n\nSummary: ${result.summary}`,
+      )
+    } catch {
+      appendAssistantMessage(`Unable to retrieve Jira status for ${issueKey}.`)
+    } finally {
+      const current = useChatStore.getState()
+      current.setIsLoading(false)
+      current.setStatusMessage(null)
+    }
+  }
+
+  const loadJiraOptions = async (targetProjectId: string) => {
+    if (!organizationId) return
+    const requestId = ++jiraOptionsRequestId.current
+    setIsLoadingJiraOptions(true)
+    setJiraOptionsError("")
+
+    try {
+      const response = await fetch("/api/jira/options", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organizationId, projectId: targetProjectId }),
+      })
+      const payload = (await response.json().catch(() => null)) as
+        | (JiraFieldOptionsResponse & { error?: string })
+        | null
+      if (jiraOptionsRequestId.current !== requestId) return
+
+      if (
+        !response.ok ||
+        !payload ||
+        !Array.isArray(payload.projects) ||
+        !Array.isArray(payload.issueTypes) ||
+        !Array.isArray(payload.assignees) ||
+        !Array.isArray(payload.priorities)
+      ) {
+        setJiraOptions(null)
+        setJiraOptionsError(
+          typeof payload?.error === "string"
+            ? payload.error
+            : "Unable to load Jira options. Please retry.",
+        )
+        return
+      }
+
+      setJiraOptions(payload)
+      setJiraDraft((current) => {
+        if (!current) return current
+        const nextProjectId = payload.projects.some((p) => p.id === targetProjectId)
+          ? targetProjectId
+          : payload.projects[0]?.id ?? ""
+        const nextIssueTypeId = payload.issueTypes.some((t) => t.id === current.issueTypeId)
+          ? current.issueTypeId
+          : payload.issueTypes.find((t) => t.name.toLowerCase() === "task")?.id ??
+            payload.issueTypes[0]?.id ??
+            ""
+        const nextAssigneeId = payload.assignees.some((a) => a.id === current.assigneeId)
+          ? current.assigneeId
+          : payload.assignees[0]?.id ?? ""
+        const nextPriorityId = payload.priorities.some((p) => p.id === current.priorityId)
+          ? current.priorityId
+          : payload.priorities.find((p) => p.name.toLowerCase() === "medium")?.id ??
+            payload.priorities.find((p) => p.isDefault)?.id ??
+            payload.priorities[0]?.id ??
+            ""
+        return {
+          ...current,
+          projectId: nextProjectId,
+          issueTypeId: nextIssueTypeId,
+          assigneeId: nextAssigneeId,
+          priorityId: nextPriorityId,
+        }
+      })
+    } catch {
+      if (jiraOptionsRequestId.current !== requestId) return
+      setJiraOptions(null)
+      setJiraOptionsError("Unable to load Jira options. Please retry.")
+    } finally {
+      if (jiraOptionsRequestId.current === requestId) {
+        setIsLoadingJiraOptions(false)
+      }
+    }
+  }
+
+  const closeJiraDraft = () => {
+    jiraOptionsRequestId.current += 1
+    setJiraDraft(null)
+    setJiraOptions(null)
+    setJiraOptionsError("")
+    setJiraError("")
+    setIsLoadingJiraOptions(false)
+  }
+
+  const handleSendMessage = async (query: string) => {
+    if (jiraDraft) return
+    const statusIssueKey = organizationId ? extractJiraStatusIssueKey(query) : null
+    if (statusIssueKey) {
+      return lookupJiraStatus(query, statusIssueKey)
+    }
+    const draft = organizationId ? draftJiraTicket(query) : null
+    if (!draft) return sendChat(query, projectId, organizationId)
+
+    useChatStore.getState().addMessage({ id: crypto.randomUUID(), role: "user", content: query })
+    setJiraError("")
+    setJiraOptions(null)
+    setJiraOptionsError("")
+    setJiraDraft({
+      ...draft,
+      projectId: DEFAULT_JIRA_PROJECT_ID,
+      issueTypeId: "",
+      assigneeId: "",
+      priorityId: "",
+    })
+    void loadJiraOptions(DEFAULT_JIRA_PROJECT_ID)
+  }
+
+  const confirmJiraTicket = async () => {
+    if (
+      !organizationId ||
+      !jiraDraft?.summary.trim() ||
+      !jiraDraft.description.trim() ||
+      !jiraDraft.projectId ||
+      !jiraDraft.issueTypeId ||
+      !jiraDraft.assigneeId ||
+      !jiraDraft.priorityId ||
+      isLoadingJiraOptions ||
+      Boolean(jiraOptionsError) ||
+      creatingTicket.current
+    ) {
+      return
+    }
+    creatingTicket.current = true
+    setIsCreatingTicket(true)
+    setJiraError("")
+    const { accountId, activeProjectId } = useChatStore.getState()
+    const unconfirmed = "Ticket creation could not be verified. Check Jira before trying again."
+    try {
+      const response = await fetch("/api/jira/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ organizationId, ...jiraDraft }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || typeof result?.ticketKey !== "string") {
+        setJiraError(typeof result?.error === "string" ? result.error : unconfirmed)
+        return
+      }
+
+      const store = useChatStore.getState()
+      if (store.accountId === accountId && store.activeProjectId === activeProjectId) {
+        store.addMessage({ id: crypto.randomUUID(), role: "assistant", content: `Created Jira ticket **${result.ticketKey}**.` })
+      }
+      closeJiraDraft()
+    } catch {
+      setJiraError(unconfirmed)
+    } finally {
+      creatingTicket.current = false
+      setIsCreatingTicket(false)
+    }
+  }
   const latestMessage = messages.at(-1)
   const fallbackQuestions = enterprise && !isLoading && latestMessage?.role === "assistant"
     && latestMessage.content === ENTERPRISE_NO_EVIDENCE ? latestMessage.fallbackQuestions : undefined
@@ -94,8 +316,11 @@ export function ChatContainer({
             <Button
               variant="ghost"
               size="xs"
-              onClick={clearChat}
-              disabled={isLoading}
+              onClick={() => {
+                closeJiraDraft()
+                clearChat()
+              }}
+              disabled={isLoading || isCreatingTicket}
               className="text-xs h-7 gap-1 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100 cursor-pointer"
             >
               <RotateCcw className="size-3" />
@@ -183,6 +408,149 @@ export function ChatContainer({
                     ))}
                   </div>
                 ) : null}
+                {jiraDraft && (
+                  <section aria-label="Jira ticket draft" className="max-w-3xl w-full mx-auto space-y-3 rounded-xl border p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-sm font-semibold">Jira ticket draft</h2>
+                      {isLoadingJiraOptions && (
+                        <span className="text-xs text-muted-foreground">Loading Jira options…</span>
+                      )}
+                    </div>
+                    {jiraOptionsError && (
+                      <div role="alert" className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                        <span>{jiraOptionsError}</span>
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={isLoadingJiraOptions || isCreatingTicket}
+                          onClick={() => void loadJiraOptions(jiraDraft.projectId)}
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <label className="block space-y-1 text-sm">
+                        <span>Project</span>
+                        <select
+                          className="w-full rounded-md border bg-background p-2 text-sm focus-visible:outline-primary"
+                          value={jiraDraft.projectId}
+                          onChange={event => {
+                            const nextProjectId = event.target.value
+                            setJiraDraft({
+                              ...jiraDraft,
+                              projectId: nextProjectId,
+                              issueTypeId: "",
+                              assigneeId: "",
+                              priorityId: "",
+                            })
+                            void loadJiraOptions(nextProjectId)
+                          }}
+                          disabled={isCreatingTicket || isLoadingJiraOptions || !jiraOptions?.projects.length}
+                          required
+                        >
+                          {(jiraOptions?.projects ?? []).map(option => (
+                            <option key={option.id} value={option.id}>
+                              {option.name} ({option.key})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block space-y-1 text-sm">
+                        <span>Issue Type</span>
+                        <select
+                          className="w-full rounded-md border bg-background p-2 text-sm focus-visible:outline-primary"
+                          value={jiraDraft.issueTypeId}
+                          onChange={event => setJiraDraft({ ...jiraDraft, issueTypeId: event.target.value })}
+                          disabled={isCreatingTicket || isLoadingJiraOptions || !jiraOptions?.issueTypes.length}
+                          required
+                        >
+                          {(jiraOptions?.issueTypes ?? []).map(option => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block space-y-1 text-sm">
+                        <span>Assignee</span>
+                        <select
+                          className="w-full rounded-md border bg-background p-2 text-sm focus-visible:outline-primary"
+                          value={jiraDraft.assigneeId}
+                          onChange={event => setJiraDraft({ ...jiraDraft, assigneeId: event.target.value })}
+                          disabled={isCreatingTicket || isLoadingJiraOptions || !jiraOptions?.assignees.length}
+                          required
+                        >
+                          {(jiraOptions?.assignees ?? []).map(option => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block space-y-1 text-sm">
+                        <span>Priority</span>
+                        <select
+                          className="w-full rounded-md border bg-background p-2 text-sm focus-visible:outline-primary"
+                          value={jiraDraft.priorityId}
+                          onChange={event => setJiraDraft({ ...jiraDraft, priorityId: event.target.value })}
+                          disabled={isCreatingTicket || isLoadingJiraOptions || !jiraOptions?.priorities.length}
+                          required
+                        >
+                          {(jiraOptions?.priorities ?? []).map(option => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <label className="block space-y-1 text-sm">
+                      <span>Summary</span>
+                      <Input
+                        value={jiraDraft.summary}
+                        onChange={event => setJiraDraft({ ...jiraDraft, summary: event.target.value })}
+                        maxLength={JIRA_SUMMARY_MAX}
+                        disabled={isCreatingTicket}
+                      />
+                    </label>
+                    <label className="block space-y-1 text-sm">
+                      <span>Description</span>
+                      <textarea
+                        className="w-full rounded-md border bg-transparent p-2 text-sm focus-visible:outline-primary"
+                        value={jiraDraft.description}
+                        onChange={event => setJiraDraft({ ...jiraDraft, description: event.target.value })}
+                        maxLength={JIRA_DESCRIPTION_MAX}
+                        disabled={isCreatingTicket}
+                        rows={4}
+                      />
+                    </label>
+                    {jiraError && <p role="alert" className="text-sm text-destructive">{jiraError}</p>}
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        onClick={confirmJiraTicket}
+                        disabled={
+                          isCreatingTicket ||
+                          isLoadingJiraOptions ||
+                          Boolean(jiraOptionsError) ||
+                          !jiraDraft.projectId ||
+                          !jiraDraft.issueTypeId ||
+                          !jiraDraft.assigneeId ||
+                          !jiraDraft.priorityId ||
+                          !jiraDraft.summary.trim() ||
+                          !jiraDraft.description.trim()
+                        }
+                      >
+                        {isCreatingTicket ? "Creating ticket…" : "Confirm"}
+                      </Button>
+                      <Button type="button" variant="outline" disabled={isCreatingTicket} onClick={closeJiraDraft}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </section>
+                )}
                 <div ref={messagesEndRef} />
               </>
             )}
@@ -194,7 +562,7 @@ export function ChatContainer({
               onSendMessage={handleSendMessage}
               isLoading={isLoading}
               statusMessage={statusMessage}
-              disabled={!projectId && !organizationId}
+              disabled={Boolean(jiraDraft) || (!projectId && !organizationId)}
               suggestedQueries={suggestedQueries}
               showSuggestions={messages.length === 0}
             />

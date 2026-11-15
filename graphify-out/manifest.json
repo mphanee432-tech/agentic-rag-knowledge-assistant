@@ -54,9 +54,9 @@
     "semantic_hash": ""
   },
   "app/login/page.tsx": {
-    "mtime": 1794557410.4969268,
-    "seen": 1794557443.4953983,
-    "ast_hash": "6a5afd5f9f214b5af2892477c87c09a3",
+    "mtime": 1794633703.2147312,
+    "seen": 1794651553.2760077,
+    "ast_hash": "3b2801516a72a7e61a6ef481f260e3ee",
     "semantic_hash": ""
   },
   "app/page.tsx": {
@@ -78,9 +78,9 @@
     "semantic_hash": "3d2b9db30040c237fd258aed2f05f269"
   },
   "components/chat/chat-container.tsx": {
-    "mtime": 1794567226.9217763,
-    "seen": 1794567302.7131772,
-    "ast_hash": "647962bb9fad829cf254e51ecbfc31e1",
+    "mtime": 1794651488.0870607,
+    "seen": 1794651553.276079,
+    "ast_hash": "c9db32f0611a6287907b48c64b47819f",
     "semantic_hash": ""
   },
   "components/chat/chat-input.tsx": {
@@ -306,9 +306,9 @@
     "semantic_hash": ""
   },
   "proxy.ts": {
-    "mtime": 1794547807.9858646,
-    "seen": 1794553321.2687001,
-    "ast_hash": "372b50d34aabc22a407c2f9612e82e28",
+    "mtime": 1794633703.2194288,
+    "seen": 1794651553.2768252,
+    "ast_hash": "bf42f7b1dc80e868a72919adb790bd8a",
     "semantic_hash": ""
   },
   "tailwind.config.ts": {
@@ -393,6 +393,24 @@
     "mtime": 1794567203.2171714,
     "seen": 1794567302.7134676,
     "ast_hash": "06dd44cf336f0829aee4c5b23233d9f4",
+    "semantic_hash": ""
+  },
+  "app/api/jira/create/route.ts": {
+    "mtime": 1794651506.1317506,
+    "seen": 1794651553.275944,
+    "ast_hash": "3eabb4760149b4bbe39f2e39dd7a38c7",
+    "semantic_hash": ""
+  },
+  "app/reset-password/page.tsx": {
+    "mtime": 1794633703.2167807,
+    "seen": 1794651553.276051,
+    "ast_hash": "2354e401cab96ebd544b0b654654f2cc",
+    "semantic_hash": ""
+  },
+  "lib/jira-ticket.ts": {
+    "mtime": 1794651504.8679667,
+    "seen": 1794651553.2765725,
+    "ast_hash": "55d230548f49d86f2af843a6bba0c47f",
     "semantic_hash": ""
   },
   "pnpm-lock.yaml": {
