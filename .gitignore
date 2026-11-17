@@ -75,3 +75,9 @@ Thumbs.db
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+
+# WP9.38 local backup directory
+/wp9_38_d01_backup/
+/wp9_39_backup/
+/wp9_40_backup/
+/wp9_41_backup/

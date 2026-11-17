@@ -1,0 +1,8 @@
+diff --git a/lib/prompts/systemPrompt.ts b/lib/prompts/systemPrompt.ts
+--- a/lib/prompts/systemPrompt.ts
++++ b/lib/prompts/systemPrompt.ts
+@@ -53,3 +53,4 @@ export function buildStrictCitationPrompt(contextBlock: string): string {
+ 5. Brevity & Density: Open directly with the technical answer or diagnostic fallback in sentence 1. Eliminate introductory acknowledgments, polite conversational padding, and meta-commentary.
++6. Interactive Guidance: If the user requests help in a documented Socratic or hint-based workflow but has not provided the actual problem or attempted step, briefly cite the documented approach and finish with a direct question addressed to the user, such as "What is the proof statement, and what have you tried so far?" Describing the approach without asking for their next input is insufficient; do not invent a proof or claim a mode is enabled.
+ `;
+ }

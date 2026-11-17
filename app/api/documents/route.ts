@@ -12,7 +12,7 @@ export async function GET(req: Request) {
 }
 export async function DELETE(req: Request) {
   try {
-    const { supabase } = await requireUser(req)
+    const { supabase } = await requireUser(req, "personal")
     const id = new URL(req.url).searchParams.get("documentId")
     if (!id) throw new HttpError(400, "Document ID is required.")
     const { data: doc, error } = await supabase.from("documents").select("id, project_id, storage_path").eq("id", id).maybeSingle()
@@ -22,7 +22,7 @@ export async function DELETE(req: Request) {
     // Delete first: an in-flight ingestion finalizer cannot resurrect this record.
     const { error: deletion } = await supabase.from("documents").delete().eq("id", id).eq("project_id", doc.project_id)
     if (deletion) throw deletion
-    const { error: storage } = await createAdminClient().storage.from("documents").remove([doc.storage_path])
+    const { error: storage } = await createAdminClient("personal").storage.from("documents").remove([doc.storage_path])
     if (storage) throw new HttpError(500, "Document deleted, but storage cleanup failed. Contact your administrator.")
     return Response.json({ success: true })
   } catch (error) { return apiError(error) }

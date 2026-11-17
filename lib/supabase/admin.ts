@@ -1,14 +1,22 @@
 import { createClient } from "@supabase/supabase-js"
+import {
+  readPublicEnvForBrowser,
+  resolveWorkspaceAdminSupabaseConfig,
+  type WorkspaceScope,
+} from "@/lib/supabase/config"
 
-export function createAdminClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+export function createAdminClient(scope: WorkspaceScope = "personal") {
+  const { url, key } = resolveWorkspaceAdminSupabaseConfig(scope, {
+    ...readPublicEnvForBrowser(),
+    personalSecretKey: process.env.PERSONAL_SUPABASE_SECRET_KEY,
+    personalServiceRoleKey: process.env.PERSONAL_SUPABASE_SERVICE_ROLE_KEY,
+    enterpriseSecretKey: process.env.ENTERPRISE_SUPABASE_SECRET_KEY,
+    enterpriseServiceRoleKey: process.env.ENTERPRISE_SUPABASE_SERVICE_ROLE_KEY,
+    genericSecretKey: process.env.SUPABASE_SECRET_KEY,
+    genericServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  })
 
-  if (!supabaseUrl || !serviceRoleKey) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variables")
-  }
-
-  return createClient(supabaseUrl, serviceRoleKey, {
+  return createClient(url, key, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,

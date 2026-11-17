@@ -1,0 +1,31 @@
+diff --git a/scripts/eval_runner.py b/scripts/eval_runner.py
+--- a/scripts/eval_runner.py
++++ b/scripts/eval_runner.py
+@@ -666,6 +666,8 @@
+     mode = parser.add_mutually_exclusive_group()
+     mode.add_argument("--smoke", action="store_true", help="Run 5-row smoke checks without release thresholds")
+     mode.add_argument("--full", action="store_true", help="Run the full golden dataset")
++    mode.add_argument("--case-ids", type=int, nargs="+", metavar="ID",
++                      help="Run only these golden case IDs (e.g. --case-ids 20 33 34 39)")
+     parser.add_argument("--release", action="store_true", help="Enforce release certification (requires --full --stream)")
+     parser.add_argument("--stream", action="store_true", help="Evaluate with streaming requests (SSE/socket TTFT)")
+     parser.add_argument("--dataset", default="evals/golden_dataset.json", help="Path to golden dataset JSON")
+@@ -703,7 +705,17 @@
+     isolation_ok, isolation_reason = False, "Isolation not checked: this is not a release run."
+ 
+     try:
+-        if args.full:
++        if args.case_ids:
++            requested_ids = set(args.case_ids)
++            if len(requested_ids) != len(args.case_ids):
++                parser.error("--case-ids must not contain duplicate IDs.")
++            known_ids = {row["id"] for row in data}
++            missing_ids = requested_ids - known_ids
++            if missing_ids:
++                parser.error(f"Unknown case IDs: {', '.join(map(str, sorted(missing_ids)))}")
++            rows = [row for row in data if row["id"] in requested_ids]
++            mode_label = f"SELECTED CASES ({len(rows)} rows: {', '.join(map(str, sorted(requested_ids)))})"
++        elif args.full:
+             rows = data
+             mode_label = f"FULL BENCHMARK ({len(rows)} rows)"
+         else:

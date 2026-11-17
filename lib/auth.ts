@@ -1,20 +1,39 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
+import {
+  isDualProjectConfigured,
+  readPublicEnvForBrowser,
+  resolveWorkspacePublicSupabaseConfig,
+  type WorkspaceScope,
+} from "@/lib/supabase/config"
 import { createServerClient } from "@/lib/supabase/server"
 
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message) }
 }
-export async function requireUser(req?: Request) {
+export async function requireUser(req?: Request, scope: WorkspaceScope = "personal") {
   const token = req?.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1]
-  const supabase = token
-    ? createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
-        global: { headers: { Authorization: `Bearer ${token}` } },
-        auth: { persistSession: false, autoRefreshToken: false },
-      })
-    : await createServerClient()
+  let supabase: SupabaseClient
+  if (token) {
+    const { url, key } = resolveWorkspacePublicSupabaseConfig(scope, readPublicEnvForBrowser())
+    supabase = createClient(url, key, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+  } else {
+    supabase = await createServerClient(scope)
+  }
   const { data: { user }, error } = await supabase.auth.getUser(token)
   if (error || !user) throw new HttpError(401, "Sign in to continue.")
-  return { supabase, user }
+  return { supabase, user, scope }
+}
+
+export interface EnterpriseAccountStatusRow {
+  organization_id: string
+  organization_name: string
+  department_id?: string | null
+  department_name?: string | null
+  role: string
+  is_active: boolean
 }
 
 export async function getEnterpriseCopilotContext(supabase: SupabaseClient, organizationId?: string) {
@@ -27,6 +46,79 @@ export async function getEnterpriseCopilotContext(supabase: SupabaseClient, orga
   }
   return data
 }
+
+export async function getEnterpriseAccountStatus(supabase: SupabaseClient) {
+  const { data, error } = await supabase
+    .rpc("enterprise_account_status")
+    .maybeSingle<EnterpriseAccountStatusRow>()
+  // Personal RAG has no enterprise functions.
+  if (error && !["PGRST202", "42883"].includes(error.code)) {
+    throw new HttpError(500, "Unable to load enterprise account status.")
+  }
+  return data
+}
+
+export async function getDemoJiraAccess(supabase: SupabaseClient): Promise<boolean | null> {
+  const { data, error } = await supabase
+    .from("demo_jira_access")
+    .select("enabled")
+    .maybeSingle<{ enabled: boolean }>()
+  // Personal RAG has no demo_jira_access table.
+  if (error && !["PGRST205", "42P01"].includes(error.code)) {
+    throw new HttpError(500, "Unable to verify Jira demo access.")
+  }
+  if (!data || typeof data.enabled !== "boolean") {
+    return null
+  }
+  return data.enabled
+}
+
+export async function requireJiraAccess(
+  supabase: SupabaseClient,
+  organizationId?: unknown,
+): Promise<void> {
+  if (organizationId !== undefined) {
+    if (typeof organizationId !== "string" || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(organizationId)) {
+      throw new HttpError(400, "A valid organization ID is required.")
+    }
+    if (!(await getEnterpriseCopilotContext(supabase, organizationId))) {
+      throw new HttpError(403, "Active membership in this organization is required.")
+    }
+  } else {
+    const accountStatus = await getEnterpriseAccountStatus(supabase)
+    if (accountStatus && !accountStatus.is_active) {
+      throw new HttpError(403, "Jira access is not enabled for this account.")
+    }
+  }
+
+  if ((await getDemoJiraAccess(supabase)) !== true) {
+    throw new HttpError(403, "Jira access is not enabled for this account.")
+  }
+}
+
+export async function isJiraAccessAvailable(
+  supabase: SupabaseClient,
+  organizationId?: string | null,
+): Promise<boolean> {
+  try {
+    const [demoAccess, accountStatus] = await Promise.all([
+      getDemoJiraAccess(supabase),
+      getEnterpriseAccountStatus(supabase),
+    ])
+    if (demoAccess !== true) {
+      return false
+    }
+    if (accountStatus && !accountStatus.is_active) {
+      return false
+    }
+    if (organizationId) {
+      return Boolean(await getEnterpriseCopilotContext(supabase, organizationId))
+    }
+    return true
+  } catch {
+    return false
+  }
+}
 async function findOwnedProject(auth: Awaited<ReturnType<typeof requireUser>>, projectId: unknown) {
   if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) {
     throw new HttpError(400, "A valid project ID is required.")
@@ -38,22 +130,54 @@ async function findOwnedProject(auth: Awaited<ReturnType<typeof requireUser>>, p
   return project
 }
 export async function requireProject(projectId: unknown, req?: Request) {
-  const auth = await requireUser(req)
+  const auth = await requireUser(req, "personal")
   const project = await findOwnedProject(auth, projectId)
   if (!project) throw new HttpError(404, "Project not found.")
   return { ...auth, project }
 }
 export async function requireChatProject(projectId: string, req?: Request) {
-  const auth = await requireUser(req)
-  const project = await findOwnedProject(auth, projectId)
-  if (project) return { ...auth, project, enterprise: false }
-  const { data, error } = await auth.supabase.rpc("enterprise_chat_projects", { target_project_id: projectId }).maybeSingle<{ id: string; name: string }>()
+  if (!isDualProjectConfigured(readPublicEnvForBrowser())) {
+    const auth = await requireUser(req, "personal")
+    const project = await findOwnedProject(auth, projectId)
+    if (project) return { ...auth, project, enterprise: false }
+    const { data, error } = await auth.supabase.rpc("enterprise_chat_projects", { target_project_id: projectId }).maybeSingle<{ id: string; name: string }>()
+    if (error) throw new HttpError(500, "Unable to load project.")
+    if (!data) throw new HttpError(404, "Project not found.")
+    return { ...auth, project: data, enterprise: true }
+  }
+
+  let personalAuth: Awaited<ReturnType<typeof requireUser>> | null = null
+  try {
+    personalAuth = await requireUser(req, "personal")
+  } catch (error) {
+    if (!(error instanceof HttpError && error.status === 401)) throw error
+  }
+  if (personalAuth) {
+    const project = await findOwnedProject(personalAuth, projectId)
+    if (project) return { ...personalAuth, project, enterprise: false }
+  }
+
+  let enterpriseAuth: Awaited<ReturnType<typeof requireUser>> | null = null
+  try {
+    enterpriseAuth = await requireUser(req, "enterprise")
+  } catch (error) {
+    if (!(error instanceof HttpError && error.status === 401)) throw error
+  }
+  if (!enterpriseAuth) {
+    if (personalAuth) throw new HttpError(404, "Project not found.")
+    throw new HttpError(401, "Sign in to continue.")
+  }
+
+  if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) {
+    throw new HttpError(400, "A valid project ID is required.")
+  }
+  const { data, error } = await enterpriseAuth.supabase.rpc("enterprise_chat_projects", { target_project_id: projectId }).maybeSingle<{ id: string; name: string }>()
   if (error) throw new HttpError(500, "Unable to load project.")
   if (!data) throw new HttpError(404, "Project not found.")
-  return { ...auth, project: data, enterprise: true }
+  return { ...enterpriseAuth, project: data, enterprise: true }
 }
 export async function requireEnterpriseUploader(projectId: string, req?: Request) {
-  const auth = await requireUser(req)
+  const auth = await requireUser(req, "enterprise")
   if (typeof projectId !== "string" || !/^[0-9a-f-]{36}$/i.test(projectId)) {
     throw new HttpError(400, "A valid project ID is required.")
   }

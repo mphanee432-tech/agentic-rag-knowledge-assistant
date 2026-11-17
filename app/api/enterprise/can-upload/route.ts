@@ -8,7 +8,7 @@ export async function GET(req: Request) {
       throw new HttpError(400, "A valid project ID is required.")
     }
 
-    const auth = await requireUser(req)
+    const auth = await requireUser(req, "enterprise")
     const { data: canUpload, error } = await auth.supabase.rpc("can_upload_enterprise_policy", {
       p_project_id: projectId,
     })

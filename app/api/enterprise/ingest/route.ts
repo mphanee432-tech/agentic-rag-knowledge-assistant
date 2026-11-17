@@ -157,10 +157,10 @@ export async function POST(req: Request) {
   const lease = crypto.randomUUID()
   const clientSignal = req.signal
   const signal = AbortSignal.timeout(270000)
-  const admin = createAdminClient()
+  const admin = createAdminClient("enterprise")
 
   try {
-    const auth = await requireUser(req)
+    const auth = await requireUser(req, "enterprise")
     const { documentId: docId, projectId } = await req.json()
 
     if (!docId || !projectId) {

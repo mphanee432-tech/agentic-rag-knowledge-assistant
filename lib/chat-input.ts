@@ -1,4 +1,49 @@
 export interface ChatMessageInput { role: "user" | "assistant"; content: string }
+export const GREETING_RESPONSE = "Hello! How can I help you?"
+export const IDENTITY_RESPONSE_WITH_JIRA =
+  "I'm your Employee Knowledge Copilot. I help you find answers from company documents you're authorized to access, provide source citations, and help you create Jira tickets with your confirmation."
+export const IDENTITY_RESPONSE_WITHOUT_JIRA =
+  "I'm your Employee Knowledge Copilot. I help you find answers from company documents you're authorized to access, and provide source citations."
+export const CAPABILITY_RESPONSE_WITH_JIRA =
+  "I can answer questions and summarize company documents you have permission to access, provide source citations, and help you create Jira tickets with your confirmation. I won't disclose documents you're not authorized to view."
+export const CAPABILITY_RESPONSE_WITHOUT_JIRA =
+  "I can answer questions and summarize company documents you have permission to access, and provide source citations. I won't disclose documents you're not authorized to view."
+
+const STANDALONE_GREETING_PATTERN = /^\s*[!.?,;:\s]*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))[!.?,;:\s]*$/i
+const STANDALONE_IDENTITY_PATTERN = /^\s*[!.?,;:\s]*(?:who|what)\s+are\s+you[!.?,;:\s]*$/i
+const STANDALONE_CAPABILITY_PATTERN = /^\s*[!.?,;:\s]*(?:what\s+can\s+you\s+do|how\s+can\s+you\s+help\s+me)[!.?,;:\s]*$/i
+
+export function isStandaloneGreeting(query: string): boolean {
+  return STANDALONE_GREETING_PATTERN.test(query)
+}
+
+export function isStandaloneIdentityQuestion(query: string): boolean {
+  return STANDALONE_IDENTITY_PATTERN.test(query)
+}
+
+export function isStandaloneCapabilityQuestion(query: string): boolean {
+  return STANDALONE_CAPABILITY_PATTERN.test(query)
+}
+
+export type DeterministicIntent = "greeting" | "identity" | "capability"
+
+export function getDeterministicIntent(query: string): DeterministicIntent | null {
+  if (STANDALONE_GREETING_PATTERN.test(query)) return "greeting"
+  if (STANDALONE_IDENTITY_PATTERN.test(query)) return "identity"
+  if (STANDALONE_CAPABILITY_PATTERN.test(query)) return "capability"
+  return null
+}
+
+export function getDeterministicResponse(intent: DeterministicIntent, canCreateJira: boolean): string {
+  switch (intent) {
+    case "greeting":
+      return GREETING_RESPONSE
+    case "identity":
+      return canCreateJira ? IDENTITY_RESPONSE_WITH_JIRA : IDENTITY_RESPONSE_WITHOUT_JIRA
+    case "capability":
+      return canCreateJira ? CAPABILITY_RESPONSE_WITH_JIRA : CAPABILITY_RESPONSE_WITHOUT_JIRA
+  }
+}
 export function parseChatInput(value: unknown) {
   if (!value || typeof value !== "object") throw new Error("Invalid request.")
   const body = value as Record<string, unknown>

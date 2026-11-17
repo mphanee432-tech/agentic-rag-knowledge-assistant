@@ -4,10 +4,13 @@ import * as React from "react"
 import { sendChat } from "@/lib/send-chat"
 import { Sidebar } from "@/components/chat/sidebar"
 import { ChatContainer } from "@/components/chat/chat-container"
+import type { AccountSummaryInfo } from "@/lib/account-summary"
 import { useChatStore } from "@/lib/store/chat-store"
 
 type ProjectWorkspaceClientProps = {
   userId: string
+  accountSummary?: AccountSummaryInfo
+  enrolled?: boolean
 } & (
   | { projectId: string; projectName?: string | null; organizationId?: never; canUploadPolicy?: never }
   | { organizationId: string; canUploadPolicy: boolean; projectId?: never; projectName?: never }
@@ -15,6 +18,8 @@ type ProjectWorkspaceClientProps = {
 
 export function ProjectWorkspaceClient({
   userId,
+  accountSummary,
+  enrolled,
   projectId,
   projectName,
   organizationId,
@@ -49,6 +54,8 @@ export function ProjectWorkspaceClient({
         projectName={projectName}
         organizationId={organizationId}
         canUploadPolicy={canUploadPolicy}
+        accountSummary={accountSummary}
+        enrolled={enrolled}
       />
     </div>
   )

@@ -1,14 +1,30 @@
 import { createBrowserClient as createSupabaseBrowserClient } from "@supabase/ssr"
+import type { SupabaseClient } from "@supabase/supabase-js"
+import {
+  readPublicEnvForBrowser,
+  resolveWorkspacePublicSupabaseConfig,
+  type WorkspaceScope,
+} from "@/lib/supabase/config"
 
-export function createBrowserClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+const browserClients = new Map<string, SupabaseClient>()
 
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY environment variables")
+export function createBrowserClient(scope: WorkspaceScope = "personal") {
+  const { url, key, cookieName } = resolveWorkspacePublicSupabaseConfig(scope, readPublicEnvForBrowser())
+  const cacheKey = `${scope}:${url}:${key}`
+  const existing = browserClients.get(cacheKey)
+  if (existing) {
+    return existing
   }
 
-  return createSupabaseBrowserClient(supabaseUrl, supabaseAnonKey)
+  // @supabase/ssr caches a single module-global browser client unless isSingleton is false.
+  const client = createSupabaseBrowserClient(url, key, {
+    isSingleton: false,
+    cookieOptions: {
+      name: cookieName,
+    },
+  })
+  browserClients.set(cacheKey, client)
+  return client
 }
 
 export const createClient = createBrowserClient

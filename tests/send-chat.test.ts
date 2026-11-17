@@ -3,6 +3,8 @@ import test from "node:test"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { MessageItem } from "../components/chat/message-item"
+import { AccountSummary } from "../components/account-summary"
+import { WorkspaceTabs } from "../components/workspace-tabs"
 import { encodeEvent, ENTERPRISE_NO_EVIDENCE, type ChatEvent } from "../lib/chat-contract"
 import { parseChatInput } from "../lib/chat-input"
 import { sendChat } from "../lib/send-chat"
@@ -184,4 +186,170 @@ test("shared chat consumer keeps metadata outside answer text and subsequent his
     assert.ok(emptyHtml.includes("Response Error"))
     assert.ok(emptyHtml.includes("The answer could not be completed. Please retry."))
   })
+})
+
+test("WP9.14: workspace tabs render Personal RAG and Enterprise RAG links and preserve independent chat histories per scope", t => {
+  const initial = useChatStore.getState()
+  t.after(() => useChatStore.setState(initial, true))
+
+  const personalTabsHtml = renderToStaticMarkup(createElement(WorkspaceTabs, { activeTab: "personal" }))
+  assert.ok(personalTabsHtml.includes("Personal RAG"))
+  assert.ok(personalTabsHtml.includes("Your private documents"))
+  assert.ok(personalTabsHtml.includes("Enterprise RAG"))
+  assert.ok(personalTabsHtml.includes("Company knowledge"))
+  assert.ok(personalTabsHtml.includes('href="/?tab=personal"'))
+  assert.ok(personalTabsHtml.includes('href="/?tab=enterprise"'))
+  assert.ok(personalTabsHtml.includes('grid-cols-2'))
+  assert.ok(personalTabsHtml.includes('focus-visible:ring-2'))
+  assert.match(personalTabsHtml, /<a[^>]*href="\/\?tab=personal"[^>]*>|<a[^>]*aria-current="page"[^>]*href="\/\?tab=personal"/)
+  assert.match(personalTabsHtml, /<a[^>]*aria-current="page"[^>]*href="\/\?tab=personal"/)
+  assert.doesNotMatch(personalTabsHtml, /<a[^>]*aria-current="page"[^>]*href="\/\?tab=enterprise"/)
+
+  const enterpriseTabsHtml = renderToStaticMarkup(createElement(WorkspaceTabs, { activeTab: "enterprise" }))
+  assert.match(enterpriseTabsHtml, /<a[^>]*aria-current="page"[^>]*href="\/\?tab=enterprise"/)
+  assert.doesNotMatch(enterpriseTabsHtml, /<a[^>]*aria-current="page"[^>]*href="\/\?tab=personal"/)
+
+  const store = useChatStore.getState()
+  const enterpriseScope = "organization:c0000000-0000-4000-8000-000000000001"
+  store.setAccount("user-1")
+  store.setActiveProject(projectId)
+  store.addMessage({ id: "p-1", role: "user", content: "Personal project question" })
+  store.addMessage({ id: "p-2", role: "assistant", content: "Personal project answer [Chunk 1]" })
+
+  // Switch to Enterprise RAG tab: starts with clean enterprise history, does not mix personal messages
+  store.setActiveProject(enterpriseScope)
+  assert.deepEqual(useChatStore.getState().messages, [])
+  store.addMessage({ id: "e-1", role: "user", content: "Enterprise policy question" })
+  store.addMessage({ id: "e-2", role: "assistant", content: "Enterprise policy answer [Chunk 1]" })
+
+  // Switch back to Personal RAG project: restores personal conversation without enterprise messages
+  store.setActiveProject(projectId)
+  assert.deepEqual(
+    useChatStore.getState().messages.map(m => m.content),
+    ["Personal project question", "Personal project answer [Chunk 1]"],
+  )
+
+  // Switch back to Enterprise RAG tab: restores enterprise conversation
+  store.setActiveProject(enterpriseScope)
+  assert.deepEqual(
+    useChatStore.getState().messages.map(m => m.content),
+    ["Enterprise policy question", "Enterprise policy answer [Chunk 1]"],
+  )
+
+  // Account switch clears all scoped histories
+  store.setAccount("user-2")
+  store.setActiveProject(projectId)
+  assert.deepEqual(useChatStore.getState().messages, [])
+  store.setActiveProject(enterpriseScope)
+  assert.deepEqual(useChatStore.getState().messages, [])
+
+  const accountHtml = renderToStaticMarkup(
+    createElement(AccountSummary, {
+      account: {
+        email: "newengineering@example.com",
+        organizationName: "DeccanBridge Software",
+        departmentName: "Engineering",
+        role: "Employee",
+        accessStatus: "Active",
+        jiraAccessAvailable: true,
+      },
+    }),
+  )
+  assert.ok(accountHtml.includes("newengineering@example.com"))
+  assert.ok(accountHtml.includes("DeccanBridge Software"))
+  assert.ok(accountHtml.includes("Engineering"))
+  assert.ok(accountHtml.includes("Employee"))
+  assert.ok(accountHtml.includes("Enterprise membership: Active"))
+  assert.ok(accountHtml.includes("Jira Access: Enabled"))
+})
+
+test("WP9.15: Sign Up page displays Department dropdown and renamed Enable Jira Ticket Creation checkbox, while Sign In displays neither", async () => {
+  const fs = await import("node:fs/promises")
+  const loginSource = await fs.readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8")
+  const { DEMO_DEPARTMENTS } = await import("../lib/utils")
+
+  assert.deepEqual(DEMO_DEPARTMENTS, [
+    "Engineering",
+    "HR",
+    "Product Management",
+    "Project Management",
+    "UI/UX",
+    "Operations",
+    "Marketing",
+    "Finance",
+  ])
+
+  // Sign In is default mode and demoJiraAccess is false (unchecked) by default
+  assert.match(loginSource, /useState<"signin"\s*\|\s*"signup"\s*\|\s*"forgot">\("signin"\)/)
+  assert.match(loginSource, /const \[demoJiraAccess, setDemoJiraAccess\] = useState\(false\)/)
+
+  // Sign Up block renders both Department dropdown and renamed Jira checkbox simultaneously, gated by mode === "signup"
+  const signupBlockMatch = loginSource.match(/\{mode === "signup" && \([\s\S]*?\n        \)\}/)
+  assert.ok(signupBlockMatch, "Expected signup-only block in app/login/page.tsx")
+  const signupBlock = signupBlockMatch[0]
+
+  assert.match(signupBlock, /name="department"[\s\S]*?required/)
+  assert.match(signupBlock, /DEMO_DEPARTMENTS\.map/)
+  assert.match(signupBlock, /type="checkbox"[\s\S]*?name="demoJiraAccess"/)
+  assert.ok(signupBlock.includes("Enable Jira Ticket Creation"))
+  assert.ok(signupBlock.includes("Allow creation of Jira tickets through the confirmation workflow."))
+  assert.ok(!signupBlock.includes(">Enterprise membership<"))
+  assert.ok(!signupBlock.includes("Enable Jira ticket creation for the demo."))
+})
+
+test("WP9.25: shared ChatInput displays updated placeholder in both Personal RAG and Enterprise RAG without changing submission", async t => {
+  const { ChatContainer } = await import("../components/chat/chat-container")
+  const { ChatInput } = await import("../components/chat/chat-input")
+  const { AppRouterContext } = await import("next/dist/shared/lib/app-router-context.shared-runtime")
+  type AppRouterInstance = import("next/dist/shared/lib/app-router-context.shared-runtime").AppRouterInstance
+  const fs = await import("node:fs/promises")
+
+  const mockRouter = {
+    back: () => {},
+    forward: () => {},
+    refresh: () => {},
+    push: () => {},
+    replace: () => {},
+    prefetch: async () => {},
+  } as unknown as AppRouterInstance
+  const renderWithRouter = (node: ReturnType<typeof createElement>) =>
+    renderToStaticMarkup(createElement(AppRouterContext.Provider, { value: mockRouter }, node))
+
+  const initial = useChatStore.getState()
+  t.after(() => useChatStore.setState(initial, true))
+
+  // Enterprise RAG ChatContainer renders the shared ChatInput placeholder
+  const orgId = "c0000000-0000-4000-8000-000000000001"
+  const enterpriseHtml = renderWithRouter(
+    createElement(ChatContainer, {
+      organizationId: orgId,
+      canUploadPolicy: false,
+    }),
+  )
+  assert.ok(enterpriseHtml.includes('placeholder="How can I help you today?"'))
+  assert.ok(!enterpriseHtml.includes("Ask a technical question, or paste logs"))
+
+  // Both Personal RAG and Enterprise RAG share the single <ChatInput /> in ChatContainer
+  const [chatContainerSource, workspaceClientSource, chatInputSource] = await Promise.all([
+    fs.readFile(new URL("../components/chat/chat-container.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../components/chat/project-workspace-client.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../components/chat/chat-input.tsx", import.meta.url), "utf8"),
+  ])
+  assert.equal((chatContainerSource.match(/<ChatInput\b/g) || []).length, 1)
+  assert.match(workspaceClientSource, /<ChatContainer\b/)
+
+  // Direct shared ChatInput render (Personal RAG & Enterprise RAG) & submission wiring remain intact
+  const inputHtml = renderToStaticMarkup(
+    createElement(ChatInput, {
+      onSendMessage: async () => {},
+      isLoading: false,
+      statusMessage: null,
+    }),
+  )
+  assert.ok(inputHtml.includes('placeholder="How can I help you today?"'))
+  assert.ok(!inputHtml.includes("Ask a technical question, or paste logs"))
+  assert.ok(inputHtml.includes("0 / 2500"))
+
+  assert.match(chatInputSource, /if \(e\.key === "Enter" && !e\.shiftKey\)/)
+  assert.match(chatInputSource, /await onSendMessage\(trimmed\)/)
 })

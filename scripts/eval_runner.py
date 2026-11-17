@@ -454,10 +454,11 @@ def evaluate_query(
     auth = auth if auth is not None else EvaluationAuth(endpoint)
     auth.get_token()
     t0 = time.perf_counter()
-    errors = []
     retries = {"embedding": 0, "retrieval": 0, "generation": 0, "request": 0}
-    trace_errors = set()
     for attempt in range(2):
+        # Judge the final attempt; earlier failures are already counted as retries.
+        errors = []
+        trace_errors = set()
         response_valid = False
         embed_ms = retrieval_ms = ttft_ms = total_ms = 0.0
         output_text = context_text = ""
@@ -666,6 +667,8 @@ def run_benchmark():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--smoke", action="store_true", help="Run 5-row smoke checks without release thresholds")
     mode.add_argument("--full", action="store_true", help="Run the full golden dataset")
+    mode.add_argument("--case-ids", type=int, nargs="+", metavar="ID",
+                      help="Run only these golden case IDs (e.g. --case-ids 20 33 34 39)")
     parser.add_argument("--release", action="store_true", help="Enforce release certification (requires --full --stream)")
     parser.add_argument("--stream", action="store_true", help="Evaluate with streaming requests (SSE/socket TTFT)")
     parser.add_argument("--dataset", default="evals/golden_dataset.json", help="Path to golden dataset JSON")
@@ -703,7 +706,17 @@ def run_benchmark():
     isolation_ok, isolation_reason = False, "Isolation not checked: this is not a release run."
 
     try:
-        if args.full:
+        if args.case_ids:
+            requested_ids = set(args.case_ids)
+            if len(requested_ids) != len(args.case_ids):
+                parser.error("--case-ids must not contain duplicate IDs.")
+            known_ids = {row["id"] for row in data}
+            missing_ids = requested_ids - known_ids
+            if missing_ids:
+                parser.error(f"Unknown case IDs: {', '.join(map(str, sorted(missing_ids)))}")
+            rows = [row for row in data if row["id"] in requested_ids]
+            mode_label = f"SELECTED CASES ({len(rows)} rows: {', '.join(map(str, sorted(requested_ids)))})"
+        elif args.full:
             rows = data
             mode_label = f"FULL BENCHMARK ({len(rows)} rows)"
         else:

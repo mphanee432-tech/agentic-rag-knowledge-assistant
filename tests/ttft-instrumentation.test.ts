@@ -171,7 +171,7 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
         }
         assert.match(url.pathname, /:streamGenerateContent$|:generateContent$/)
         const body = JSON.parse(String(init?.body))
-        assert.equal(body.generationConfig.maxOutputTokens, 750)
+        assert.equal(body.generationConfig.maxOutputTokens, 1000)
         assert.ok(init?.signal)
         if (scenario.deadline || scenario.requestAbort) {
           await modelGate

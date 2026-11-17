@@ -39,6 +39,7 @@ interface ChatStore {
   accountId: string | null
   setAccount: (accountId: string | null) => void
   messages: ChatMessage[]
+  messagesByScope: Record<string, ChatMessage[]>
   activeProjectId: string | null
   isLoading: boolean
   statusMessage: string | null
@@ -63,10 +64,11 @@ interface ChatStore {
 export const useChatStore = create<ChatStore>((set) => ({
   accountId: null,
   setAccount: (accountId) => set(state => state.accountId === accountId ? state : {
-    accountId, activeProjectId: null, messages: [], documents: [], suggestedQueries: [],
+    accountId, activeProjectId: null, messages: [], messagesByScope: {}, documents: [], suggestedQueries: [],
     isLoading: false, statusMessage: null, isDocumentsLoading: true,
   }),
   messages: [],
+  messagesByScope: {},
   activeProjectId: null,
   isLoading: false,
   statusMessage: null,
@@ -75,14 +77,24 @@ export const useChatStore = create<ChatStore>((set) => ({
   isDocumentsLoading: true,
 
   setActiveProject: (projectId: string) =>
-    set({
-      activeProjectId: projectId,
-      isLoading: false,
-      messages: [],
-      statusMessage: null,
-      documents: [],
-      suggestedQueries: [],
-      isDocumentsLoading: true,
+    set((state) => {
+      const canPreserveScope = Boolean(
+        state.accountId && state.activeProjectId && state.activeProjectId !== projectId,
+      )
+      const nextMessagesByScope =
+        canPreserveScope && state.activeProjectId
+          ? { ...state.messagesByScope, [state.activeProjectId]: state.messages }
+          : state.messagesByScope
+      return {
+        activeProjectId: projectId,
+        isLoading: false,
+        messages: canPreserveScope ? nextMessagesByScope[projectId] ?? [] : [],
+        messagesByScope: nextMessagesByScope,
+        statusMessage: null,
+        documents: [],
+        suggestedQueries: [],
+        isDocumentsLoading: true,
+      }
     }),
 
   setStatusMessage: (status: string | null) =>
@@ -93,14 +105,25 @@ export const useChatStore = create<ChatStore>((set) => ({
       const updated = [...state.messages, message]
       // Strictly enforce bounded 5-turn sliding window (maximum 10 messages: 5 user turns + 5 assistant turns)
       const bounded = updated.length > 10 ? updated.slice(updated.length - 10) : updated
-      return { messages: bounded }
+      const nextMessagesByScope =
+        state.accountId && state.activeProjectId
+          ? { ...state.messagesByScope, [state.activeProjectId]: bounded }
+          : state.messagesByScope
+      return { messages: bounded, messagesByScope: nextMessagesByScope }
     }),
 
   clearChat: () =>
-    set({
-      messages: [],
-      statusMessage: null,
-      isLoading: false,
+    set((state) => {
+      const nextMessagesByScope = { ...state.messagesByScope }
+      if (state.activeProjectId) {
+        delete nextMessagesByScope[state.activeProjectId]
+      }
+      return {
+        messages: [],
+        messagesByScope: nextMessagesByScope,
+        statusMessage: null,
+        isLoading: false,
+      }
     }),
 
   setIsLoading: (isLoading: boolean) =>
@@ -118,7 +141,11 @@ export const useChatStore = create<ChatStore>((set) => ({
         citations: citations !== undefined ? citations : last.citations,
         interactionId: interactionId !== undefined ? interactionId : last.interactionId,
       }
-      return { messages: updated }
+      const nextMessagesByScope =
+        state.accountId && state.activeProjectId
+          ? { ...state.messagesByScope, [state.activeProjectId]: updated }
+          : state.messagesByScope
+      return { messages: updated, messagesByScope: nextMessagesByScope }
     }),
 
   setDocuments: (documents: DocumentItem[]) =>

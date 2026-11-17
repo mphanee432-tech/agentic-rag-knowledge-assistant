@@ -3,6 +3,7 @@ import test from "node:test"
 import { POST } from "../app/api/jira/create/route"
 import { POST as POST_OPTIONS } from "../app/api/jira/options/route"
 import { POST as POST_STATUS } from "../app/api/jira/status/route"
+import { buildAccountSummary } from "../lib/account-summary"
 import {
   DEFAULT_JIRA_PROJECT_ID,
   draftJiraTicket,
@@ -116,7 +117,12 @@ test("Jira route requires an active employee, validates live options, and verifi
     }
     if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
       assert.deepEqual(JSON.parse(String(init?.body)), { target_organization_id: organizationId })
-      return Response.json(token === "Bearer inactive" ? [] : [{ organization_id: organizationId }])
+      return Response.json(
+        token === "Bearer inactive" || token === "Bearer nonmember" ? [] : [{ organization_id: organizationId }],
+      )
+    }
+    if (url.pathname === "/rest/v1/demo_jira_access") {
+      return Response.json({ enabled: true })
     }
     if (url.href === "https://activepieces.invalid/api/v1/webhooks/options/sync") {
       optionsCalls++
@@ -140,6 +146,7 @@ test("Jira route requires an active employee, validates live options, and verifi
 
   assert.equal((await create(details, "expired")).status, 401)
   assert.equal((await create(details, "inactive")).status, 403)
+  assert.equal((await create(details, "nonmember")).status, 403)
   assert.equal((await create(details, "employee", "text/plain")).status, 415)
   assert.equal((await create({ ...details, projectId: "99999" })).status, 403)
   for (const invalid of [
@@ -256,6 +263,9 @@ test("Jira options route enforces auth, membership, project allowlist, and filte
     if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
       return Response.json(token === "Bearer inactive" ? [] : [{ organization_id: organizationId }])
     }
+    if (url.pathname === "/rest/v1/demo_jira_access") {
+      return Response.json({ enabled: true })
+    }
     optionsCalls++
     assert.equal(url.href, "https://activepieces.invalid/api/v1/webhooks/options/sync")
     const body = JSON.parse(String(init?.body)) as { projectId: string; projectKey: string }
@@ -313,6 +323,122 @@ test("Jira options route enforces auth, membership, project allowlist, and filte
   }
 })
 
+test("buildAccountSummary derives exact Employee, Manager, CXO, Inactive, and missing membership states", () => {
+  const orgId = "c0000000-0000-4000-8000-000000000001"
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "employee@deccanbridge.invalid",
+      enterprise: { organization_id: orgId, can_upload_policy: false },
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "employee", is_active: true },
+      demoJiraAccess: true,
+    }),
+    {
+      email: "employee@deccanbridge.invalid",
+      role: "Employee",
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Active",
+      jiraAccessAvailable: true,
+    },
+  )
+
+  // Missing/NULL demo_jira_access defaults to Disabled even for active Enterprise employees
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "employee-null-jira@deccanbridge.invalid",
+      enterprise: { organization_id: orgId, can_upload_policy: false },
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "employee", is_active: true },
+      demoJiraAccess: null,
+    }),
+    {
+      email: "employee-null-jira@deccanbridge.invalid",
+      role: "Employee",
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Active",
+      jiraAccessAvailable: false,
+    },
+  )
+
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "manager@deccanbridge.invalid",
+      enterprise: { organization_id: orgId, can_upload_policy: true },
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "manager", is_active: true },
+      demoJiraAccess: true,
+    }),
+    {
+      email: "manager@deccanbridge.invalid",
+      role: "Manager",
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Active",
+      jiraAccessAvailable: true,
+    },
+  )
+
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "cxo@deccanbridge.invalid",
+      enterprise: { organization_id: orgId, can_upload_policy: true },
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "cxo", is_active: true },
+      demoJiraAccess: true,
+    }),
+    {
+      email: "cxo@deccanbridge.invalid",
+      role: "CXO",
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Active",
+      jiraAccessAvailable: true,
+    },
+  )
+
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "inactive@deccanbridge.invalid",
+      enterprise: null,
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "employee", is_active: false },
+      demoJiraAccess: true,
+    }),
+    {
+      email: "inactive@deccanbridge.invalid",
+      role: "Employee",
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Inactive",
+      jiraAccessAvailable: false,
+    },
+  )
+
+  // Never labels users "Manager / CXO" when exact role is unknown
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "unknown-role@deccanbridge.invalid",
+      enterprise: { organization_id: orgId, can_upload_policy: true },
+      accountStatus: null,
+      demoJiraAccess: true,
+    }),
+    {
+      email: "unknown-role@deccanbridge.invalid",
+      role: null,
+      organizationName: "DeccanBridge Software",
+      accessStatus: "Active",
+      jiraAccessAvailable: true,
+    },
+  )
+
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "dummy@example.invalid",
+      enterprise: null,
+      accountStatus: null,
+    }),
+    {
+      email: "dummy@example.invalid",
+      role: null,
+      organizationName: null,
+      accessStatus: "No enterprise access",
+      jiraAccessAvailable: false,
+    },
+  )
+})
+
 test("extracts and normalizes explicit Jira status requests without affecting creation or RAG queries", () => {
   assert.equal(extractJiraStatusIssueKey("What is the status of ECD-6?"), "ECD-6")
   assert.equal(extractJiraStatusIssueKey("Check ECD-6 status"), "ECD-6")
@@ -365,7 +491,12 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     }
     if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
       assert.deepEqual(JSON.parse(String(init?.body)), { target_organization_id: organizationId })
-      return Response.json(token === "Bearer inactive" ? [] : [{ organization_id: organizationId }])
+      return Response.json(
+        token === "Bearer inactive" || token === "Bearer nonmember" ? [] : [{ organization_id: organizationId }],
+      )
+    }
+    if (url.pathname === "/rest/v1/demo_jira_access") {
+      return Response.json({ enabled: true })
     }
     webhookCalls++
     assert.equal(url.href, "https://activepieces.invalid/api/v1/webhooks/status/sync")
@@ -435,4 +566,437 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     assert.equal(response.status, 502)
   }
   assert.equal(webhookCalls, 9)
+})
+
+test("WP9.13: demo Jira opt-in authorizes ECD/KAN without enterprise membership and denies opt-out users", async (t) => {
+  const env = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://supabase.invalid",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key",
+    ACTIVEPIECES_JIRA_WEBHOOK_URL: "https://activepieces.invalid/api/v1/webhooks/example/sync/",
+    ACTIVEPIECES_JIRA_OPTIONS_WEBHOOK_URL: "https://activepieces.invalid/api/v1/webhooks/options/sync/",
+  }
+  const previous = Object.entries(env).map(([key]) => [key, process.env[key]] as const)
+  Object.assign(process.env, env)
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  let webhookCalls = 0
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    const token = new Headers(init?.headers).get("authorization")
+    if (url.pathname === "/auth/v1/user") {
+      if (token === "Bearer enrolled-optout") {
+        return Response.json({
+          id: "enrolled-optout-user",
+          role: "authenticated",
+          user_metadata: { demo_jira_access: false, demo_department: "Engineering" },
+        })
+      }
+      return Response.json({ id: token === "Bearer demo-enabled" ? "demo-user" : "plain-user", role: "authenticated" })
+    }
+    if (url.pathname === "/rest/v1/demo_jira_access") {
+      if (token === "Bearer demo-enabled") return Response.json({ enabled: true })
+      if (token === "Bearer enrolled-optout") return Response.json({ enabled: false })
+      return Response.json(null)
+    }
+    if (url.pathname === "/rest/v1/rpc/enterprise_account_status") {
+      return Response.json(
+        token === "Bearer enrolled-optout"
+          ? [{ organization_id: "c0000000-0000-4000-8000-000000000001", role: "employee", is_active: true }]
+          : [],
+      )
+    }
+    if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
+      return Response.json(
+        token === "Bearer enrolled-optout"
+          ? [{ organization_id: "c0000000-0000-4000-8000-000000000001", can_upload_policy: false }]
+          : [],
+      )
+    }
+    if (url.href === "https://activepieces.invalid/api/v1/webhooks/options/sync") {
+      const body = JSON.parse(String(init?.body)) as { projectId: string }
+      return Response.json(makeLiveOptionsPayload(body.projectId))
+    }
+    if (url.href === "https://activepieces.invalid/api/v1/webhooks/example/sync") {
+      webhookCalls++
+      return Response.json({ success: true, ticketKey: "ECD-99" })
+    }
+    throw new Error(`Unexpected URL: ${url.href}`)
+  })
+
+  const postOptions = (body: unknown, token: string) =>
+    POST_OPTIONS(
+      new Request("https://app.invalid/api/jira/options", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    )
+
+  const postCreate = (body: unknown, token: string) =>
+    POST(
+      new Request("https://app.invalid/api/jira/create", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    )
+
+  // Opt-out user: 403 on both /api/jira/options and /api/jira/create
+  assert.equal((await postOptions({}, "plain-user")).status, 403)
+  assert.equal(
+    (
+      await postCreate(
+        {
+          summary: "Opt-out test",
+          description: "Should be rejected",
+          projectId: DEFAULT_JIRA_PROJECT_ID,
+          issueTypeId: DEFAULT_ISSUE_TYPE_ID,
+          assigneeId: DEFAULT_ASSIGNEE_ID,
+          priorityId: DEFAULT_PRIORITY_ID,
+        },
+        "plain-user",
+      )
+    ).status,
+    403,
+  )
+  assert.equal(webhookCalls, 0)
+
+  // Opt-in user: authorized for ECD and KAN, rejected for non-allowlisted project
+  const optionsRes = await postOptions({}, "demo-enabled")
+  assert.equal(optionsRes.status, 200)
+  const optionsJson = (await optionsRes.json()) as { projects: Array<{ id: string; key: string }> }
+  assert.deepEqual(
+    optionsJson.projects.map((p) => p.key),
+    ["ECD", "KAN"],
+  )
+
+  assert.equal(
+    (
+      await postCreate(
+        {
+          summary: "Unauthorized project",
+          description: "Should be rejected",
+          projectId: "10999",
+          issueTypeId: DEFAULT_ISSUE_TYPE_ID,
+          assigneeId: DEFAULT_ASSIGNEE_ID,
+          priorityId: DEFAULT_PRIORITY_ID,
+        },
+        "demo-enabled",
+      )
+    ).status,
+    403,
+  )
+  assert.equal(webhookCalls, 0)
+
+  const createRes = await postCreate(
+    {
+      summary: "Demo Jira opt-in ticket",
+      description: "Created after explicit confirmation",
+      projectId: DEFAULT_JIRA_PROJECT_ID,
+      issueTypeId: DEFAULT_ISSUE_TYPE_ID,
+      assigneeId: DEFAULT_ASSIGNEE_ID,
+      priorityId: DEFAULT_PRIORITY_ID,
+    },
+    "demo-enabled",
+  )
+  assert.equal(createRes.status, 200)
+  assert.deepEqual(await createRes.json(), { ticketKey: "ECD-99" })
+  assert.equal(webhookCalls, 1)
+
+  // Account summary accurately reflects Jira access without granting enterprise roles or org membership
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "demo@example.invalid",
+      enterprise: null,
+      accountStatus: null,
+      demoJiraAccess: true,
+    }),
+    {
+      email: "demo@example.invalid",
+      role: null,
+      organizationName: null,
+      accessStatus: "No enterprise access",
+      jiraAccessAvailable: true,
+    },
+  )
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "plain@example.invalid",
+      enterprise: null,
+      accountStatus: null,
+      demoJiraAccess: false,
+    }),
+    {
+      email: "plain@example.invalid",
+      role: null,
+      organizationName: null,
+      accessStatus: "No enterprise access",
+      jiraAccessAvailable: false,
+    },
+  )
+
+  // WP9.15: Enrolled enterprise employee with explicit Jira opt-out preserves Jira opt-out and department name
+  const orgId = "c0000000-0000-4000-8000-000000000001"
+  assert.deepEqual(
+    buildAccountSummary({
+      email: "phani9119en@gmail.com",
+      enterprise: { organization_id: orgId, can_upload_policy: false },
+      accountStatus: {
+        organization_id: orgId,
+        organization_name: "DeccanBridge Software",
+        department_name: "Engineering",
+        role: "employee",
+        is_active: true,
+      },
+      demoJiraAccess: false,
+    }),
+    {
+      email: "phani9119en@gmail.com",
+      role: "Employee",
+      organizationName: "DeccanBridge Software",
+      departmentName: "Engineering",
+      accessStatus: "Active",
+      jiraAccessAvailable: false,
+    },
+  )
+
+  assert.equal((await postOptions({ organizationId: orgId }, "enrolled-optout")).status, 403)
+  assert.equal(
+    (
+      await postCreate(
+        {
+          organizationId: orgId,
+          summary: "Opt-out enterprise user",
+          description: "Must not override Jira opt-out",
+          projectId: DEFAULT_JIRA_PROJECT_ID,
+          issueTypeId: DEFAULT_ISSUE_TYPE_ID,
+          assigneeId: DEFAULT_ASSIGNEE_ID,
+          priorityId: DEFAULT_PRIORITY_ID,
+        },
+        "enrolled-optout",
+      )
+    ).status,
+    403,
+  )
+  assert.equal(webhookCalls, 1)
+})
+
+test("WP9.24: authoritative demo_jira_access enforces backend, chatbot, UI, status separation, and confirmation", async (t) => {
+  const { POST: POST_CHAT } = await import("../app/api/chat/route")
+  const {
+    CAPABILITY_RESPONSE_WITH_JIRA,
+    CAPABILITY_RESPONSE_WITHOUT_JIRA,
+  } = await import("../lib/chat-input")
+  const fs = await import("node:fs/promises")
+
+  const orgId = "c0000000-0000-4000-8000-000000000001"
+  const wrongOrgId = "99999999-9999-4999-8999-999999999999"
+  const env = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://supabase.invalid",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key",
+    ACTIVEPIECES_JIRA_WEBHOOK_URL: "https://activepieces.invalid/api/v1/webhooks/example/sync/",
+    ACTIVEPIECES_JIRA_OPTIONS_WEBHOOK_URL: "https://activepieces.invalid/api/v1/webhooks/options/sync/",
+    ACTIVEPIECES_JIRA_STATUS_WEBHOOK_URL: "https://activepieces.invalid/api/v1/webhooks/status/sync/",
+  }
+  const previous = Object.entries(env).map(([key]) => [key, process.env[key]] as const)
+  Object.assign(process.env, env)
+  t.after(() => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  t.mock.method(console, "info", () => {})
+  t.mock.method(console, "error", () => {})
+
+  type UserProfile = {
+    id: string
+    department: string | null
+    active: boolean | null // null = personal/demo user with no org row
+    metaJira?: boolean
+    dbJira: boolean | null | "error"
+  }
+
+  const users: Record<string, UserProfile> = {
+    "eng-enabled": { id: "u-eng-1", department: "Engineering", active: true, metaJira: true, dbJira: true },
+    "eng-disabled": { id: "u-eng-2", department: "Engineering", active: true, metaJira: false, dbJira: false },
+    "eng-missing": { id: "u-eng-3", department: "Engineering", active: true, dbJira: null },
+    "db-error": { id: "u-err", department: "Engineering", active: true, metaJira: true, dbJira: "error" },
+    "meta-true-db-false": { id: "u-m1", department: "Engineering", active: true, metaJira: true, dbJira: false },
+    "meta-false-db-true": { id: "u-m2", department: "Engineering", active: true, metaJira: false, dbJira: true },
+    "inactive-emp": { id: "u-inact", department: "Engineering", active: false, metaJira: true, dbJira: true },
+    "standalone-optin": { id: "u-pers", department: null, active: null, metaJira: false, dbJira: true },
+  }
+
+  let createWebhookCalls = 0
+  let statusWebhookCalls = 0
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(input instanceof Request ? input.url : String(input))
+    const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "") ?? ""
+
+    if (url.pathname === "/auth/v1/user") {
+      const profile = users[token]
+      if (!profile) return Response.json({ message: "Unauthorized" }, { status: 401 })
+      return Response.json({
+        id: profile.id,
+        role: "authenticated",
+        user_metadata: profile.metaJira === undefined ? {} : { demo_jira_access: profile.metaJira },
+      })
+    }
+
+    const profile = users[token]
+    if (url.pathname === "/rest/v1/demo_jira_access") {
+      if (!profile || profile.dbJira === "error") {
+        return Response.json({ message: "Database lookup failed" }, { status: 500 })
+      }
+      return Response.json(profile.dbJira === null ? null : { enabled: profile.dbJira })
+    }
+
+    if (url.pathname === "/rest/v1/rpc/enterprise_account_status") {
+      if (!profile || profile.active === null) return Response.json([])
+      return Response.json([{
+        organization_id: orgId,
+        organization_name: "DeccanBridge Software",
+        department_name: profile.department,
+        role: "employee",
+        is_active: profile.active,
+      }])
+    }
+
+    if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
+      const { target_organization_id } = JSON.parse(String(init?.body ?? "{}")) as { target_organization_id?: string }
+      if (!profile || profile.active !== true || target_organization_id !== orgId) {
+        return Response.json([])
+      }
+      return Response.json([{ organization_id: orgId, can_upload_policy: false }])
+    }
+
+    if (url.href === "https://activepieces.invalid/api/v1/webhooks/options/sync") {
+      const body = JSON.parse(String(init?.body)) as { projectId: string }
+      return Response.json(makeLiveOptionsPayload(body.projectId))
+    }
+    if (url.href === "https://activepieces.invalid/api/v1/webhooks/example/sync") {
+      createWebhookCalls++
+      return Response.json({ success: true, ticketKey: "ECD-200" })
+    }
+    if (url.href === "https://activepieces.invalid/api/v1/webhooks/status/sync") {
+      statusWebhookCalls++
+      return Response.json({ success: true, ticketKey: "ECD-6", status: "In Progress", summary: "VPN issue" })
+    }
+    throw new Error(`Unexpected URL: ${url.href}`)
+  })
+
+  const baseTicket = {
+    summary: "WP9.24 test ticket",
+    description: "Verify authoritative Jira permissions",
+    projectId: DEFAULT_JIRA_PROJECT_ID,
+    issueTypeId: DEFAULT_ISSUE_TYPE_ID,
+    assigneeId: DEFAULT_ASSIGNEE_ID,
+    priorityId: DEFAULT_PRIORITY_ID,
+  }
+  const req = (route: string, body: unknown, token: string) =>
+    new Request(`https://app.invalid${route}`, {
+      method: "POST",
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })
+
+  // 1, 6, 13: Explicit DB enabled (even if metadata=false) & standalone non-deactivated opt-in allowed
+  for (const allowedToken of ["eng-enabled", "meta-false-db-true"]) {
+    assert.equal((await POST_OPTIONS(req("/api/jira/options", { organizationId: orgId }, allowedToken))).status, 200)
+    assert.equal((await POST(req("/api/jira/create", { ...baseTicket, organizationId: orgId }, allowedToken))).status, 200)
+  }
+  assert.equal((await POST(req("/api/jira/create", baseTicket, "standalone-optin"))).status, 200)
+  assert.equal(createWebhookCalls, 3)
+
+  // 2, 3, 5, 7, 11, 13: DB disabled, NULL/missing, or metadata-only true -> 403 (with & without organizationId)
+  for (const deniedToken of ["eng-disabled", "eng-missing", "meta-true-db-false"]) {
+    for (const payloadOrg of [orgId, undefined]) {
+      const optBody = payloadOrg ? { organizationId: payloadOrg } : {}
+      const createBody = payloadOrg ? { ...baseTicket, organizationId: payloadOrg } : baseTicket
+      assert.equal((await POST_OPTIONS(req("/api/jira/options", optBody, deniedToken))).status, 403)
+      assert.equal((await POST(req("/api/jira/create", createBody, deniedToken))).status, 403)
+    }
+  }
+
+  // 4: Database permission lookup failure fails closed (non-2xx, zero webhooks)
+  assert.equal((await POST_OPTIONS(req("/api/jira/options", { organizationId: orgId }, "db-error"))).status, 500)
+  assert.equal((await POST(req("/api/jira/create", { ...baseTicket, organizationId: orgId }, "db-error"))).status, 500)
+
+  // 8: Inactive Enterprise employee denied BOTH with organizationId AND when omitting organizationId
+  assert.equal((await POST_OPTIONS(req("/api/jira/options", { organizationId: orgId }, "inactive-emp"))).status, 403)
+  assert.equal((await POST(req("/api/jira/create", { ...baseTicket, organizationId: orgId }, "inactive-emp"))).status, 403)
+  assert.equal((await POST_OPTIONS(req("/api/jira/options", {}, "inactive-emp"))).status, 403)
+  assert.equal((await POST(req("/api/jira/create", baseTicket, "inactive-emp"))).status, 403)
+
+  // 9: Unauthorized organization denied
+  assert.equal((await POST_OPTIONS(req("/api/jira/options", { organizationId: wrongOrgId }, "eng-enabled"))).status, 403)
+  assert.equal((await POST(req("/api/jira/create", { ...baseTicket, organizationId: wrongOrgId }, "eng-enabled"))).status, 403)
+
+  // 10: Unauthenticated requests denied with 401
+  assert.equal((await POST_OPTIONS(req("/api/jira/options", { organizationId: orgId }, "invalid"))).status, 401)
+  assert.equal((await POST(req("/api/jira/create", { ...baseTicket, organizationId: orgId }, "invalid"))).status, 401)
+  assert.equal((await POST_STATUS(req("/api/jira/status", { organizationId: orgId, issueKey: "ECD-6" }, "invalid"))).status, 401)
+  assert.equal(createWebhookCalls, 3)
+
+  // 12: Jira-disabled & NULL-Jira active Enterprise employees CAN still check Jira status
+  for (const statusToken of ["eng-disabled", "eng-missing", "meta-true-db-false"]) {
+    const statusRes = await POST_STATUS(req("/api/jira/status", { organizationId: orgId, issueKey: "ECD-6" }, statusToken))
+    assert.equal(statusRes.status, 200)
+  }
+  assert.equal((await POST_STATUS(req("/api/jira/status", { organizationId: orgId, issueKey: "ECD-6" }, "inactive-emp"))).status, 403)
+  assert.equal((await POST_STATUS(req("/api/jira/status", { organizationId: wrongOrgId, issueKey: "ECD-6" }, "eng-enabled"))).status, 403)
+  assert.equal(statusWebhookCalls, 3)
+
+  // 14: Chatbot capability messaging & UI summary agree with backend authorization
+  for (const [token, expectAvailable] of [
+    ["eng-enabled", true],
+    ["meta-false-db-true", true],
+    ["eng-disabled", false],
+    ["eng-missing", false],
+    ["meta-true-db-false", false],
+    ["db-error", false],
+  ] as const) {
+    const chatRes = await POST_CHAT(req("/api/chat", { organizationId: orgId, query: "what can you do?", stream: false }, token))
+    assert.equal(chatRes.status, 200)
+    const chatJson = (await chatRes.json()) as { text: string }
+    assert.equal(chatJson.text, expectAvailable ? CAPABILITY_RESPONSE_WITH_JIRA : CAPABILITY_RESPONSE_WITHOUT_JIRA)
+
+    const profile = users[token]
+    const uiSummary = buildAccountSummary({
+      email: `${token}@deccanbridge.invalid`,
+      enterprise: { organization_id: orgId, can_upload_policy: false },
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "employee", is_active: true },
+      demoJiraAccess: typeof profile.dbJira === "boolean" ? profile.dbJira : false,
+    })
+    assert.equal(uiSummary.jiraAccessAvailable, expectAvailable)
+  }
+
+  // Inactive Enterprise employee UI stays Disabled even when dbJira is true
+  assert.equal(
+    buildAccountSummary({
+      email: "inactive@deccanbridge.invalid",
+      enterprise: null,
+      accountStatus: { organization_id: orgId, organization_name: "DeccanBridge Software", role: "employee", is_active: false },
+      demoJiraAccess: true,
+    }).jiraAccessAvailable,
+    false,
+  )
+
+  // 15: Explicit confirmation stays required in normal UI flow (drafting opens form, only Confirm calls /api/jira/create)
+  const [chatContainerSrc, draftComponentSrc] = await Promise.all([
+    fs.readFile(new URL("../components/chat/chat-container.tsx", import.meta.url), "utf8"),
+    fs.readFile(new URL("../components/jira/jira-ticket-draft.tsx", import.meta.url), "utf8"),
+  ])
+  assert.match(chatContainerSrc, /const canDraftJira = Boolean\(accountSummary\?\.jiraAccessAvailable\)/)
+  assert.match(chatContainerSrc, /openJiraDraft\(draft\)/)
+  assert.doesNotMatch(chatContainerSrc, /\/api\/jira\/create/)
+  assert.match(draftComponentSrc, /onClick=\{onConfirm\}[\s\S]*Confirm/)
+  assert.match(draftComponentSrc, /fetch\("\/api\/jira\/create"/)
 })

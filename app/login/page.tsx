@@ -1,7 +1,8 @@
 "use client"
-import { useState, type FormEvent } from "react"
-import { useRouter } from "next/navigation"
+import { Suspense, useState, type FormEvent } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { createBrowserClient } from "@/lib/supabase/client"
+import { normalizeWorkspaceScope, type WorkspaceScope } from "@/lib/supabase/config"
 import { useChatStore } from "@/lib/store/chat-store"
 import {
   DEMO_DEPARTMENTS,
@@ -18,7 +19,7 @@ function clearPendingDepartmentCookie() {
   document.cookie = `${PENDING_DEMO_DEPARTMENT_COOKIE}=; path=/; max-age=0; SameSite=Lax`
 }
 
-function getPendingDepartmentCookie(userId: string) {
+function getPendingDepartmentCookie(userId: string): DemoDepartment | undefined {
   const prefix = `${PENDING_DEMO_DEPARTMENT_COOKIE}=${userId}:`
   const match = document.cookie
     .split("; ")
@@ -39,9 +40,13 @@ async function completeDemoOnboarding(department: DemoDepartment) {
   clearPendingDepartmentCookie()
 }
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const initialWorkspace = normalizeWorkspaceScope(searchParams.get("workspace"), "personal")
+  const [workspace, setWorkspace] = useState<WorkspaceScope>(initialWorkspace)
   const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin")
+  const [demoJiraAccess, setDemoJiraAccess] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
   const [pending, setPending] = useState(false)
@@ -54,7 +59,7 @@ export default function LoginPage() {
     const form = new FormData(event.currentTarget)
     const email = String(form.get("email") ?? "").trim()
     const password = String(form.get("password") ?? "")
-    const supabase = createBrowserClient()
+    const supabase = createBrowserClient(workspace)
 
     try {
       if (mode === "forgot") {
@@ -62,7 +67,7 @@ export default function LoginPage() {
           setError("Please enter your email address.")
           return
         }
-        const redirectTo = `${window.location.origin}/reset-password`
+        const redirectTo = `${window.location.origin}/reset-password?workspace=${workspace}`
         const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
           redirectTo,
         })
@@ -83,27 +88,87 @@ export default function LoginPage() {
           setError("Unable to sign in. Check your email and password.")
           return
         }
-        const pendingDepartment = getPendingDepartmentCookie(data.session.user.id)
+        if (workspace === "personal") {
+          useChatStore.getState().setAccount(null)
+          router.replace("/?tab=personal")
+          router.refresh()
+          return
+        }
+        const cookieDept = getPendingDepartmentCookie(data.session.user.id)
+        const metaDept = isDemoDepartment(data.session.user.user_metadata?.demo_department)
+          ? data.session.user.user_metadata.demo_department
+          : undefined
+        const pendingDepartment = cookieDept ?? metaDept
+        let newlyEnrolled = false
         if (pendingDepartment) {
-          await completeDemoOnboarding(pendingDepartment)
+          const response = await fetch("/api/enterprise/onboard", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ department: pendingDepartment }),
+          })
+          clearPendingDepartmentCookie()
+          if (response.ok) {
+            newlyEnrolled = true
+          }
         }
         useChatStore.getState().setAccount(null)
-        router.replace("/")
+        router.replace(newlyEnrolled ? "/?tab=enterprise&enrolled=1" : "/?tab=enterprise")
+        router.refresh()
+        return
+      }
+
+      if (workspace === "personal") {
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email,
+          password,
+        })
+        if (
+          signUpError?.code === "user_already_exists" ||
+          signUpError?.code === "email_exists" ||
+          /already registered|already exists/i.test(signUpError?.message ?? "") ||
+          data.user?.identities?.length === 0
+        ) {
+          setError("An account with this email already exists. Please sign in.")
+          return
+        }
+        if (signUpError) {
+          setError(signUpError.message || "Unable to sign up. Check your email and password.")
+          return
+        }
+        if (!data.session) {
+          setNotice("Account created. Please check your email to confirm your account, then sign in.")
+          setMode("signin")
+          return
+        }
+        useChatStore.getState().setAccount(null)
+        router.replace("/?tab=personal")
         router.refresh()
         return
       }
 
       const selectedDepartment = String(form.get("department") ?? "").trim()
       if (!isDemoDepartment(selectedDepartment)) {
-        setError("Please select a valid demo department.")
+        setError("Please select a valid DeccanBridge department.")
         return
       }
 
-      const { data, error: signUpError } = await supabase.auth.signUp({ email, password })
+      const { data, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            demo_jira_access: demoJiraAccess,
+            demo_department: selectedDepartment,
+          },
+        },
+      })
 
-      if (signUpError?.code === "user_already_exists" || signUpError?.code === "email_exists" ||
+      if (
+        signUpError?.code === "user_already_exists" ||
+        signUpError?.code === "email_exists" ||
         /already registered|already exists/i.test(signUpError?.message ?? "") ||
-        data.user?.identities?.length === 0) {
+        data.user?.identities?.length === 0
+      ) {
         setError("An account with this email already exists. Please sign in.")
         return
       }
@@ -112,15 +177,23 @@ export default function LoginPage() {
         return
       }
       if (!data.session) {
-        setError("Immediate signup is unavailable. Please contact the demo administrator.")
+        if (data.user?.id) {
+          setPendingDepartmentCookie(data.user.id, selectedDepartment)
+        }
+        setNotice(
+          "Account created. Please check your email to confirm your account, then sign in to complete department membership activation.",
+        )
+        setMode("signin")
         return
       }
 
       setPendingDepartmentCookie(data.session.user.id, selectedDepartment)
-      setMode("signin")
       await completeDemoOnboarding(selectedDepartment)
+      setNotice(
+        `Enterprise Employee membership activated for DeccanBridge Software (${selectedDepartment}).`,
+      )
       useChatStore.getState().setAccount(null)
-      router.replace("/")
+      router.replace("/?tab=enterprise&enrolled=1")
       router.refresh()
     } catch (err) {
       setError(
@@ -140,6 +213,40 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen flex items-center justify-center p-6">
       <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-4">
+        <div className="space-y-1.5">
+          <span className="block text-xs font-medium text-muted-foreground">Workspace</span>
+          <div className="flex border rounded overflow-hidden" role="group" aria-label="Workspace selection">
+            <button
+              type="button"
+              onClick={() => {
+                setWorkspace("personal")
+                setError("")
+                setNotice("")
+              }}
+              aria-pressed={workspace === "personal"}
+              className={`flex-1 py-2 text-xs font-medium ${
+                workspace === "personal" ? "bg-foreground text-background" : "bg-background"
+              }`}
+            >
+              Personal RAG
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setWorkspace("enterprise")
+                setError("")
+                setNotice("")
+              }}
+              aria-pressed={workspace === "enterprise"}
+              className={`flex-1 py-2 text-xs font-medium ${
+                workspace === "enterprise" ? "bg-foreground text-background" : "bg-background"
+              }`}
+            >
+              Enterprise RAG
+            </button>
+          </div>
+        </div>
+
         <div className="flex border rounded overflow-hidden">
           <button
             type="button"
@@ -171,10 +278,14 @@ export default function LoginPage() {
 
         <h1 className="text-2xl font-semibold">
           {mode === "signin"
-            ? "Sign in to Knowledge Assistant"
+            ? workspace === "enterprise"
+              ? "Sign in to Enterprise RAG"
+              : "Sign in to Personal RAG"
             : mode === "forgot"
               ? "Reset your password"
-              : "Sign up for Knowledge Assistant"}
+              : workspace === "enterprise"
+                ? "Sign up for Enterprise RAG"
+                : "Sign up for Personal RAG"}
         </h1>
 
         <label className="block">
@@ -219,47 +330,81 @@ export default function LoginPage() {
         )}
 
         {mode === "signup" && (
-          <div className="space-y-1.5">
-            <label className="block">
-              Demo Department
-              <select
-                className="block w-full border rounded p-2 bg-background"
-                name="department"
-                defaultValue=""
-                required
-              >
-                <option value="" disabled>Select a department</option>
-                {DEMO_DEPARTMENTS.map((dept) => (
-                  <option key={dept} value={dept}>
-                    {dept}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="text-xs text-muted-foreground">
-              Public demo signup assigns standard Employee access for DeccanBridge Software in your selected department.
-            </p>
+          <div className="space-y-3">
+            {workspace === "enterprise" ? (
+              <>
+                <label className="block space-y-1">
+                  <span className="text-sm font-medium">Department</span>
+                  <select
+                    className="block w-full border rounded p-2 bg-background text-sm"
+                    name="department"
+                    defaultValue=""
+                    required={workspace === "enterprise"}
+                  >
+                    <option value="" disabled>
+                      Select a department
+                    </option>
+                    {DEMO_DEPARTMENTS.map((dept) => (
+                      <option key={dept} value={dept}>
+                        {dept}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-start gap-2.5 rounded-md border p-3 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="demoJiraAccess"
+                    checked={demoJiraAccess}
+                    onChange={(event) => setDemoJiraAccess(event.target.checked)}
+                    className="mt-0.5 size-4 rounded border"
+                  />
+                  <span className="space-y-1">
+                    <span className="block font-medium">Enable Jira Ticket Creation</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Allow creation of Jira tickets through the confirmation workflow.
+                    </span>
+                  </span>
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  Selecting a department automatically grants active Employee membership in DeccanBridge Software with access to Company-wide Standard and your department&apos;s Standard documents.
+                </p>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Create a Personal RAG account for private document workspaces and isolated vector search.
+              </p>
+            )}
           </div>
         )}
 
-        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-        {notice && <p role="status" className="text-sm text-foreground">{notice}</p>}
+        {error && (
+          <p role="alert" className="text-sm text-destructive">
+            {error}
+          </p>
+        )}
+        {notice && (
+          <p role="status" className="text-sm text-emerald-700 dark:text-emerald-400">
+            {notice}
+          </p>
+        )}
 
-        <div className="flex items-center gap-3">
-          <button disabled={pending} className="border rounded px-4 py-2">
-            {mode === "signin"
+        <button disabled={pending} className="border rounded px-4 py-2">
+          {mode === "signin"
+            ? pending
+              ? "Signing in…"
+              : "Sign in"
+            : mode === "forgot"
               ? pending
-                ? "Signing in…"
-                : "Sign in"
-              : mode === "forgot"
-                ? pending
-                  ? "Sending…"
-                  : "Send reset link"
-                : pending
-                  ? "Signing up…"
-                  : "Sign Up"}
-          </button>
-          {mode === "forgot" && (
+                ? "Sending reset link…"
+                : "Send reset link"
+              : pending
+                ? "Signing up…"
+                : "Sign Up"}
+        </button>
+
+        {mode === "forgot" && (
+          <div>
             <button
               type="button"
               onClick={() => {
@@ -269,11 +414,25 @@ export default function LoginPage() {
               }}
               className="text-sm underline text-muted-foreground hover:text-foreground"
             >
-              Back to sign in
+              Back to Sign in
             </button>
-          )}
-        </div>
+          </div>
+        )}
       </form>
     </main>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen flex items-center justify-center p-6">
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        </main>
+      }
+    >
+      <LoginForm />
+    </Suspense>
   )
 }

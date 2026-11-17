@@ -15,7 +15,7 @@ export async function POST(req: Request) {
   if (req.headers.get("x-webhook-secret") !== secret && authorization !== `Bearer ${secret}`) {
     return Response.json({ error: "Unauthorized webhook caller." }, { status: 401 })
   }
-  const admin = createAdminClient()
+  let admin = createAdminClient("personal")
   const lease = crypto.randomUUID()
   let documentId: string | undefined
   let claimed = false
@@ -27,6 +27,11 @@ export async function POST(req: Request) {
     if (body.record?.bucket_id && body.record.bucket_id !== "documents") return Response.json({ ignored: true })
     const storagePath = body.record?.name || body.storagePath
     if (typeof storagePath !== "string") return Response.json({ error: "Missing storage path." }, { status: 400 })
+    const requestedWorkspace = new URL(req.url).searchParams.get("workspace")
+    const workspace = requestedWorkspace === "enterprise" || storagePath.startsWith("enterprise/")
+      ? "enterprise"
+      : "personal"
+    admin = createAdminClient(workspace)
     // Only preallocated records may be ingested. Never create or reassign a document from webhook input.
     const { data: doc, error } = await admin.from("documents")
       .select("id, project_id, storage_path, status, expected_size").eq("storage_path", storagePath).maybeSingle()

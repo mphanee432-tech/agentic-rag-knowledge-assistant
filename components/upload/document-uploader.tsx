@@ -58,7 +58,7 @@ export function DocumentUploader({
   useEffect(() => {
     return () => {
       if (activeChannelRef.current) {
-        const supabase = createClient()
+        const supabase = createClient("personal")
         supabase.removeChannel(activeChannelRef.current)
       }
       if (pollTimerRef.current) {
@@ -161,7 +161,7 @@ export function DocumentUploader({
     setStatusText("Uploading directly to secure storage...")
 
     try {
-      const supabase = createClient()
+      const supabase = createClient("personal")
 
       const reservation = await fetch("/api/documents/upload-url", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -189,7 +189,7 @@ export function DocumentUploader({
         if (docData.documents && useChatStore.getState().activeProjectId === projectId) {
           setDocuments(docData.documents)
         }
-      } catch (e) {}
+      } catch (e) { }
 
       // Completion handler
       const handleIndexed = async () => {
@@ -238,7 +238,7 @@ export function DocumentUploader({
           const docRes = await fetch(`/api/documents?projectId=${projectId}`)
           const docData = await docRes.json()
           if (docData.documents && useChatStore.getState().activeProjectId === projectId) setDocuments(docData.documents)
-        } catch (e) {}
+        } catch (e) { }
       }
 
       // Subscribe to PostgreSQL changes on the documents table filtered by id=eq.${documentId}
@@ -324,9 +324,8 @@ export function DocumentUploader({
 
       {/* Soft Free-Tier Processing Warning Banner */}
       <div
-        className={`bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 p-3 rounded-lg text-xs flex items-center gap-2 ${
-          largeDropzone ? "w-full max-w-xl mx-auto" : "w-full"
-        }`}
+        className={`bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 p-3 rounded-lg text-xs flex items-center gap-2 ${largeDropzone ? "w-full max-w-xl mx-auto" : "w-full"
+          }`}
       >
         <AlertCircle className="h-4 w-4 shrink-0" />
         <span>
@@ -344,13 +343,12 @@ export function DocumentUploader({
               fileInputRef.current?.click()
             }
           }}
-          className={`relative border-2 border-dashed rounded-2xl p-8 md:p-12 flex flex-col items-center justify-center text-center transition-all cursor-pointer w-full max-w-xl mx-auto shadow-sm ${
-            isDragging
+          className={`relative border-2 border-dashed rounded-2xl p-8 md:p-12 flex flex-col items-center justify-center text-center transition-all cursor-pointer w-full max-w-xl mx-auto shadow-sm ${isDragging
               ? "border-primary bg-primary/10 scale-[1.01]"
               : status === "failed"
-              ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
-              : "border-zinc-300 dark:border-zinc-700 hover:border-primary/60 hover:bg-zinc-50/80 dark:hover:bg-zinc-900/60 bg-white/60 dark:bg-zinc-900/40"
-          }`}
+                ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
+                : "border-zinc-300 dark:border-zinc-700 hover:border-primary/60 hover:bg-zinc-50/80 dark:hover:bg-zinc-900/60 bg-white/60 dark:bg-zinc-900/40"
+            }`}
         >
           {status === "failed" ? (
             <div className="flex flex-col items-center gap-3 py-4 text-rose-600 dark:text-rose-400">
@@ -486,13 +484,12 @@ export function DocumentUploader({
               fileInputRef.current?.click()
             }
           }}
-          className={`relative border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center text-center transition-all cursor-pointer ${
-            isDragging
+          className={`relative border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center text-center transition-all cursor-pointer ${isDragging
               ? "border-primary bg-primary/5 scale-[0.99]"
               : status === "failed"
-              ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
-              : "border-zinc-200 dark:border-zinc-800 hover:border-primary/50 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 bg-white/40 dark:bg-zinc-950/40"
-          }`}
+                ? "border-rose-400 dark:border-rose-800 bg-rose-50/40 dark:bg-rose-950/20"
+                : "border-zinc-200 dark:border-zinc-800 hover:border-primary/50 hover:bg-zinc-50/50 dark:hover:bg-zinc-900/50 bg-white/40 dark:bg-zinc-950/40"
+            }`}
         >
           {status === "failed" ? (
             <div className="flex flex-col items-center gap-2 py-2 text-rose-600 dark:text-rose-400">

@@ -116,7 +116,7 @@ export function ChatInput({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask a technical question, or paste logs, RFCs, and stack traces (up to 2,500 chars)..."
+          placeholder="How can I help you today?"
           disabled={disabled || isLoading}
           rows={2}
           className="w-full resize-none bg-transparent px-4 py-3.5 text-sm leading-relaxed text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 focus:outline-hidden disabled:opacity-50 font-sans"

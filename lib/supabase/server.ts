@@ -1,19 +1,21 @@
 import { createServerClient as createSupabaseServerClient } from "@supabase/ssr"
 import { cookies } from "next/headers"
+import {
+  readPublicEnvForBrowser,
+  resolveWorkspacePublicSupabaseConfig,
+  type WorkspaceScope,
+} from "@/lib/supabase/config"
 
 export const createClient = createServerClient
 
-export async function createServerClient() {
+export async function createServerClient(scope: WorkspaceScope = "personal") {
   const cookieStore = await cookies()
+  const { url, key, cookieName } = resolveWorkspacePublicSupabaseConfig(scope, readPublicEnvForBrowser())
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-  if (!supabaseUrl || !supabaseAnonKey) {
-    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY environment variables")
-  }
-
-  return createSupabaseServerClient(supabaseUrl, supabaseAnonKey, {
+  return createSupabaseServerClient(url, key, {
+    cookieOptions: {
+      name: cookieName,
+    },
     cookies: {
       getAll() {
         return cookieStore.getAll()

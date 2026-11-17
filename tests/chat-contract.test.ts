@@ -47,6 +47,7 @@ test("citations resolve every index including grouped references", () => {
 })
 
 test("only complete, bounded answers with valid references or an exact refusal pass", () => {
+  assert.equal(MAX_ANSWER_CHARS, 4000)
   const citations = [{ id: "a", index: 1, content: "evidence" }]
   assert.doesNotThrow(() => assertValidAnswer("Answer [Chunk 1]", citations, "stop"))
   assert.doesNotThrow(() => assertValidAnswer(NO_EVIDENCE, [], "stop"))

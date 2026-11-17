@@ -204,7 +204,7 @@ export function EnterprisePolicyDialog({
         if (!reserveRes.ok) throw new Error(reserveData.error || "Upload authorization failed.")
 
         const { documentId, projectId, storagePath, token } = reserveData
-        const { error: uploadError } = await createClient().storage
+        const { error: uploadError } = await createClient("enterprise").storage
           .from("documents")
           .uploadToSignedUrl(storagePath, token, file, {
             contentType: file.type || "application/octet-stream",

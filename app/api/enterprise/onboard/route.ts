@@ -3,20 +3,19 @@ import { isDemoDepartment, PENDING_DEMO_DEPARTMENT_COOKIE } from "@/lib/utils"
 
 export async function POST(req: Request) {
   try {
-    const { supabase } = await requireUser(req)
-    const body = await req.json()
+    const { supabase } = await requireUser(req, "enterprise")
+    const rawBody = await req.text()
+    if (rawBody.length > 4_000) {
+      throw new HttpError(413, "Onboarding request is too large.")
+    }
+    const body = rawBody ? JSON.parse(rawBody) : null
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new HttpError(400, "Invalid JSON payload.")
     }
 
     const payload = body as Record<string, unknown>
-    if (
-      (payload.role !== undefined && payload.role !== "employee") ||
-      payload.is_active !== undefined ||
-      payload.can_upload_policy !== undefined ||
-      payload.grants !== undefined ||
-      payload.project_memberships !== undefined
-    ) {
+    const disallowedKeys = Object.keys(payload).filter((key) => key !== "department")
+    if (disallowedKeys.length > 0) {
       throw new HttpError(403, "Public signup only assigns the employee role.")
     }
 
@@ -27,7 +26,12 @@ export async function POST(req: Request) {
 
     const { data, error } = await supabase
       .rpc("onboard_demo_employee", { target_department: department })
-      .maybeSingle<{ organization_id: string; department_id: string; role: string }>()
+      .maybeSingle<{
+        organization_id: string
+        department_id: string
+        department_name?: string
+        role: string
+      }>()
 
     if (error) {
       if (error.code === "22023") {
@@ -47,6 +51,7 @@ export async function POST(req: Request) {
       {
         organizationId: data.organization_id,
         departmentId: data.department_id,
+        departmentName: data.department_name ?? department,
         role: data.role,
       },
       {
@@ -59,4 +64,3 @@ export async function POST(req: Request) {
     return apiError(error)
   }
 }
-

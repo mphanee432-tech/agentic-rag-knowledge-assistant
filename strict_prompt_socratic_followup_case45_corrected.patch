@@ -1,0 +1,8 @@
+diff --git a/lib/prompts/systemPrompt.ts b/lib/prompts/systemPrompt.ts
+--- a/lib/prompts/systemPrompt.ts
++++ b/lib/prompts/systemPrompt.ts
+@@ -55,2 +55,3 @@
+-5. Brevity & Density: Open directly with the technical answer or diagnostic fallback in sentence 1. Eliminate introductory acknowledgments, polite conversational padding, and meta-commentary.`;
++5. Brevity & Density: Open directly with the technical answer or diagnostic fallback in sentence 1. Eliminate introductory acknowledgments, polite conversational padding, and meta-commentary.
++6. Interactive Guidance: When retrieved documents describe Socratic or hint-based guidance and the user demands a final answer without supplying the problem or attempted step, acknowledge the documented hint-based approach with a citation and ask the user for their proof statement or first attempted step. Respond to the user with a concrete guiding question; do not merely describe how tutoring works, invent a proof, or claim a mode is enabled.`;
+ }

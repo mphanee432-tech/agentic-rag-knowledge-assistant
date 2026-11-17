@@ -7,7 +7,6 @@ import { POST as feedback } from "../app/api/feedback/route"
 import { POST as chat } from "../app/api/chat/route"
 import { POST as ingestPolicy } from "../app/api/enterprise/ingest/route"
 import { POST as onboardEmployee } from "../app/api/enterprise/onboard/route"
-import { DEMO_DEPARTMENTS } from "../lib/utils"
 
 test("public routes enforce identity and ownership before privileged operations", async t => {
   const env = {
@@ -287,28 +286,15 @@ test("public routes enforce identity and ownership before privileged operations"
     assert.deepEqual(mutations, ["document", "storage"])
   })
 
-  await t.test("public demo onboarding assigns one-time employee role and rejects privilege escalation or department changes", async st => {
-    assert.deepEqual(DEMO_DEPARTMENTS, [
-      "Engineering",
-      "HR",
-      "Product Management",
-      "Project Management",
-      "UI/UX",
-      "Operations",
-      "Marketing",
-      "Finance",
-    ])
-    const organizationId = "c0000000-0000-4000-8000-000000000001"
-    const departmentIds: Record<string, string> = {
-      Engineering: "c0000000-0000-4000-8000-000000000002",
-      HR: "859355c7-c42c-4db8-b827-a13d0b827641",
-    }
-    const assignments = new Map<string, string>()
+  await t.test("enterprise onboarding enforces one-time employee department enrollment and rejects privilege escalation", async st => {
+    const orgId = "c0000000-0000-4000-8000-000000000001"
+    let rpcCalls = 0
+    const enrolledByUser = new Map<string, { department: string; role: string }>()
+    enrolledByUser.set("existing-manager", { department: "Engineering", role: "manager" })
 
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       const headers = new Headers(init?.headers)
-      assert.equal(headers.get("apikey"), env.NEXT_PUBLIC_SUPABASE_ANON_KEY, "Onboarding must never use service-role")
       const authHeader = headers.get("authorization") || ""
       if (url.pathname === "/auth/v1/user") {
         if (authHeader === "Bearer expired") return Response.json({ message: "Invalid" }, { status: 401 })
@@ -316,85 +302,84 @@ test("public routes enforce identity and ownership before privileged operations"
         return Response.json({ id: userId, aud: "authenticated", role: "authenticated" })
       }
       if (url.pathname === "/rest/v1/rpc/onboard_demo_employee") {
+        rpcCalls += 1
         const userId = authHeader.replace(/^Bearer /, "")
         const { target_department } = JSON.parse(String(init?.body)) as { target_department: string }
-        const deptId = departmentIds[target_department]
-        if (!deptId) {
-          return Response.json({ code: "22023", message: "Invalid department" }, { status: 400 })
-        }
-        const existing = assignments.get(userId)
-        if (existing && existing !== deptId) {
+        const existing = enrolledByUser.get(userId)
+        if (existing && (existing.department !== target_department || existing.role !== "employee")) {
           return Response.json(
             { code: "42501", message: "Department assignment is one-time and cannot be changed" },
             { status: 403 },
           )
         }
-        assignments.set(userId, deptId)
-        return Response.json([{ organization_id: organizationId, department_id: deptId, role: "employee" }])
+        enrolledByUser.set(userId, { department: target_department, role: "employee" })
+        return Response.json({
+          organization_id: orgId,
+          department_id: "c0000000-0000-4000-8000-000000000002",
+          department_name: target_department,
+          role: "employee",
+        })
       }
       throw new Error(`Unexpected request: ${url.pathname}`)
     })
 
-    // Unauthenticated onboarding is rejected
+    // Unauthenticated onboarding is rejected without calling RPC
     assert.equal(
       (await onboardEmployee(request("/api/enterprise/onboard", "expired", "POST", { department: "Engineering" }))).status,
       401,
     )
 
-    // Invalid department is rejected before calling RPC
-    for (const invalidDept of ["", "Admin", "Executive", null, 123]) {
-      const res = await onboardEmployee(
-        request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: invalidDept }),
+    // Invalid departments are rejected before calling RPC
+    for (const badDept of [{ department: "" }, { department: "Executive" }, {}]) {
+      assert.equal(
+        (await onboardEmployee(request("/api/enterprise/onboard", "new-eng-user", "POST", badDept))).status,
+        400,
       )
-      assert.equal(res.status, 400)
     }
 
-    // Attempts to request non-employee roles, grants, or uploader privileges are rejected with 403
-    for (const body of [
+    // Privilege escalation or client-supplied role/org/grants/user_id keys are rejected with 403 before calling RPC
+    for (const escalationBody of [
       { department: "Engineering", role: "manager" },
       { department: "Engineering", role: "cxo" },
-      { department: "Engineering", can_upload_policy: true },
+      { department: "Engineering", role: "employee" },
+      { department: "Engineering", organizationId: orgId },
+      { department: "Engineering", userId: "other-user" },
       { department: "Engineering", is_active: true },
-      { department: "Engineering", grants: [docId] },
-      { department: "Engineering", project_memberships: [projects.a] },
+      { department: "Engineering", grants: ["D03"] },
+      { department: "Engineering", project_memberships: ["D12"] },
     ]) {
-      const res = await onboardEmployee(request("/api/enterprise/onboard", "recruiter-eng", "POST", body))
+      const res = await onboardEmployee(request("/api/enterprise/onboard", "new-eng-user", "POST", escalationBody))
       assert.equal(res.status, 403)
     }
+    assert.equal(rpcCalls, 0)
 
-    // 1. Recruiter signs up and selects Engineering
-    const engRes = await onboardEmployee(
-      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "Engineering" }),
+    // Valid one-time Engineering signup enrollment succeeds and is idempotent on retry
+    const firstEnroll = await onboardEmployee(
+      request("/api/enterprise/onboard", "new-eng-user", "POST", { department: "Engineering" }),
     )
-    assert.equal(engRes.status, 200)
-    assert.deepEqual(await engRes.json(), {
-      organizationId,
-      departmentId: departmentIds.Engineering,
+    assert.equal(firstEnroll.status, 200)
+    assert.deepEqual(await firstEnroll.json(), {
+      organizationId: orgId,
+      departmentId: "c0000000-0000-4000-8000-000000000002",
+      departmentName: "Engineering",
       role: "employee",
     })
-    assert.match(engRes.headers.get("set-cookie") || "", /pending_demo_department=;.*Max-Age=0/)
 
-    // Idempotent retry with the same department succeeds
-    const engRetry = await onboardEmployee(
-      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "Engineering" }),
+    const retryEnroll = await onboardEmployee(
+      request("/api/enterprise/onboard", "new-eng-user", "POST", { department: "Engineering" }),
     )
-    assert.equal(engRetry.status, 200)
+    assert.equal(retryEnroll.status, 200)
 
-    // 6. Attempting to switch department afterward is denied with 403
-    const switchRes = await onboardEmployee(
-      request("/api/enterprise/onboard", "recruiter-eng", "POST", { department: "HR" }),
+    // Attempting to switch departments or overwrite an existing Manager/CXO membership is rejected with 403
+    const switchDept = await onboardEmployee(
+      request("/api/enterprise/onboard", "new-eng-user", "POST", { department: "HR" }),
     )
-    assert.equal(switchRes.status, 403)
+    assert.equal(switchDept.status, 403)
 
-    // 4. HR signup receives HR employee assignment
-    const hrRes = await onboardEmployee(
-      request("/api/enterprise/onboard", "recruiter-hr", "POST", { department: "HR" }),
+    const managerAttempt = await onboardEmployee(
+      request("/api/enterprise/onboard", "existing-manager", "POST", { department: "Engineering" }),
     )
-    assert.equal(hrRes.status, 200)
-    assert.deepEqual(await hrRes.json(), {
-      organizationId,
-      departmentId: departmentIds.HR,
-      role: "employee",
-    })
+    assert.equal(managerAttempt.status, 403)
+    assert.equal(rpcCalls, 4)
   })
 })

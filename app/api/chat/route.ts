@@ -1,12 +1,16 @@
 import { google } from '@ai-sdk/google';
 import { APICallError, streamText, generateText, type LanguageModelUsage } from 'ai';
 import { GoogleGenAI } from '@google/genai';
-import { getEnterpriseCopilotContext, HttpError, requireChatProject, requireUser } from '@/lib/auth';
+import { getEnterpriseCopilotContext, HttpError, isJiraAccessAvailable, requireChatProject, requireUser } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAnswer, NO_EVIDENCE, MAX_ANSWER_CHARS, type ChatEvent } from '@/lib/chat-contract';
 import { getSystemPrompt } from '@/lib/prompts/systemPrompt';
 
-import { parseChatInput } from '@/lib/chat-input';
+import {
+  getDeterministicIntent,
+  getDeterministicResponse,
+  parseChatInput,
+} from '@/lib/chat-input';
 import { retrieveVerifiedChunks } from '@/lib/retrieve-chunks';
 import { withTimeout } from '@/lib/with-timeout';
 import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citations';
@@ -20,6 +24,8 @@ type FailureStage = 'stream_initialization' | 'model_stream_iteration' | 'model_
 type FailureCategory = 'provider_timeout' | 'provider_error' | 'stream_interrupted' | 'generation_incomplete'
   | 'answer_empty' | 'answer_too_long' | 'invalid_citations' | 'interaction_write_failed'
   | 'request_cancelled' | 'unknown_error';
+type EnterpriseRejectionReason = 'none' | 'no_retrieved_chunks' | 'incomplete_finish_reason'
+  | 'model_refusal' | 'answer_length_exceeded' | 'invalid_citations' | 'visibility_recheck_failed';
 
 function sanitizeProviderError(error: unknown): {
   status: number | null;
@@ -83,6 +89,13 @@ export async function POST(req: Request) {
     provider_error_message: null as string | null,
     model_stream_completed: false,
     interaction_write_started: false,
+    retrieved_chunks_found: null as boolean | null,
+    model_finish_reason: null as string | null,
+    model_refusal: false,
+    citation_validation_failed: false,
+    answer_length_failed: false,
+    visibility_recheck_failed: false,
+    enterprise_rejection_reason: null as EnterpriseRejectionReason | null,
   };
   const recordFailure = (failedStage: FailureStage, error: unknown, category: FailureCategory =
     failedStage === 'interaction_persistence' ? 'interaction_write_failed'
@@ -150,7 +163,7 @@ export async function POST(req: Request) {
     const authStart = performance.now();
     const { user, supabase, enterprise } = projectId
       ? await requireChatProject(projectId, req)
-      : { ...await requireUser(req), enterprise: true };
+      : { ...await requireUser(req, 'enterprise'), enterprise: true };
     if (organizationId && !await getEnterpriseCopilotContext(supabase, organizationId)) {
       throw new HttpError(404, 'Organization not found.');
     }
@@ -158,6 +171,64 @@ export async function POST(req: Request) {
     const promptVariant = req.headers.get('x-prompt-variant') || input.promptVariant;
     isEvalMode = !input.wantsStream && (input.isEvalMode || req.headers.get('x-eval-mode') === 'true');
     telemetry.request_mode = isEvalMode ? 'json' : 'stream';
+    const deterministicIntent = getDeterministicIntent(userQuery);
+    if (deterministicIntent) {
+      const jiraEnabled = deterministicIntent === 'greeting'
+        ? false
+        : await isJiraAccessAvailable(supabase, organizationId);
+      const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
+
+      telemetry.retrieved_chunk_count = 0;
+      telemetry.context_chars = 0;
+      failure.retrieved_chunks_found = false;
+      const deterministicHeaders = {
+        'Cache-Control': 'no-store',
+        ...(!enterprise ? { 'x-interaction-id': interactionId } : {}),
+        'x-rag-embedding-ms': '0',
+        'x-rag-retrieval-ms': '0',
+      };
+      if (isEvalMode) {
+        telemetry.ttft_ms = Math.round(performance.now() - reqStart);
+        telemetry.total_ms = Math.round(performance.now() - reqStart);
+        logTiming('success');
+        return Response.json({
+          text: deterministicResponse,
+          output: deterministicResponse,
+          context: '',
+          citations: [],
+          retrieved_chunks: [],
+          ...(!enterprise ? { interactionId } : {}),
+          metrics: telemetry,
+        }, { headers: deterministicHeaders });
+      }
+      const deterministicStream = new ReadableStream<Uint8Array>({
+        cancel() { cancelled = true; },
+        start(controller) {
+          try {
+            controller.enqueue(encodeEvent({ type: 'metadata', ...(!enterprise ? { interactionId } : {}), citations: [] }));
+            telemetry.ttft_ms = Math.round(performance.now() - reqStart);
+            telemetry.server_ttft_ms = performance.now() - reqStart;
+            controller.enqueue(encodeEvent({ type: 'text', text: deterministicResponse }));
+            telemetry.total_ms = Math.round(performance.now() - reqStart);
+            telemetry.server_finish_ready_ms = performance.now() - reqStart;
+            controller.enqueue(encodeEvent({
+              type: 'finish',
+              metrics: telemetry,
+              ...(req.headers.get('x-eval-mode') === 'true' ? { context: '' } : {}),
+            }));
+            controller.close();
+            logTiming('success');
+          } catch (error) {
+            recordFailure('sse_emission', error);
+            logTiming('error');
+            throw error;
+          }
+        },
+      });
+      return new Response(deterministicStream, {
+        headers: { ...deterministicHeaders, 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' },
+      });
+    }
     const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY });
     // Stage 1: Query Embedding via gemini-embedding-2 (1536d MRL)
     const tEmbedStart = performance.now();
@@ -218,6 +289,7 @@ export async function POST(req: Request) {
     const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
     telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
     telemetry.retrieved_chunk_count = relevantChunks.length;
+    failure.retrieved_chunks_found = relevantChunks.length > 0;
 
     let citations = relevantChunks.map((c, index: number) => ({
       id: c.id,
@@ -234,8 +306,24 @@ export async function POST(req: Request) {
         || /^I don't know(?:\s+based on the documents I can access)?\.?(?:\s*\[Chunk[^\]]*\])*\s*$/i.test(trimmed);
     };
     const prepareEnterpriseAnswer = async (text: string, finishReason: string, signal: AbortSignal) => {
-      if (!enterprise || finishReason !== 'stop') return text;
-      if (!isEnterpriseRefusal(text) && text.length <= MAX_ANSWER_CHARS && validCitations(text, citations)) {
+      if (!enterprise) return text;
+      if (!relevantChunks.length) {
+        failure.enterprise_rejection_reason = 'no_retrieved_chunks';
+        citations = [];
+        contextString = '';
+        return ENTERPRISE_NO_EVIDENCE;
+      }
+      if (finishReason !== 'stop') {
+        failure.enterprise_rejection_reason = 'incomplete_finish_reason';
+        return text;
+      }
+      const refused = isEnterpriseRefusal(text);
+      const tooLong = text.length > MAX_ANSWER_CHARS;
+      const citationsValid = !refused && !tooLong && validCitations(text, citations);
+      failure.model_refusal = refused;
+      failure.answer_length_failed = !refused && tooLong;
+      failure.citation_validation_failed = !refused && !tooLong && !citationsValid;
+      if (!refused && !tooLong && citationsValid) {
         const chunkIds = relevantChunks.map(chunk => chunk.id);
         const visibility = organizationId
           ? supabase.rpc('enterprise_chunks_still_visible', { target_organization_id: organizationId, chunk_ids: chunkIds })
@@ -246,10 +334,19 @@ export async function POST(req: Request) {
         signal.throwIfAborted();
         if (error) throw new Error('Unable to verify evidence authorization.');
         if (data === true) {
+          failure.enterprise_rejection_reason = 'none';
           const cited = new Set(citationIndices(text));
           citations = citations.filter(citation => cited.has(citation.index));
           return text;
         }
+        failure.visibility_recheck_failed = true;
+        failure.enterprise_rejection_reason = 'visibility_recheck_failed';
+      } else {
+        failure.enterprise_rejection_reason = refused
+          ? 'model_refusal'
+          : tooLong
+            ? 'answer_length_exceeded'
+            : 'invalid_citations';
       }
       citations = [];
       contextString = '';
@@ -258,9 +355,18 @@ export async function POST(req: Request) {
 
     const finalizeAnswer = async (text: string, finishReason: string, signal = req.signal) => {
       stage = 'answer_validation';
+      if (!enterprise && relevantChunks.length > 0) {
+        failure.model_refusal = isNoEvidenceAnswer(text);
+      }
       try {
         assertValidAnswer(text, citations, finishReason);
       } catch (error) {
+        if (!enterprise) {
+          failure.answer_length_failed = finishReason === 'stop' && text.length > MAX_ANSWER_CHARS;
+          failure.citation_validation_failed = finishReason === 'stop'
+            && error instanceof Error
+            && error.message === 'Answer contains missing or invalid citations.';
+        }
         recordFailure(stage, error, finishReason !== 'stop' ? 'generation_incomplete'
           : !text.trim() ? 'answer_empty' : text.length > MAX_ANSWER_CHARS ? 'answer_too_long'
           : error instanceof Error && error.message === 'Answer contains missing or invalid citations.'
@@ -287,7 +393,7 @@ export async function POST(req: Request) {
         signal.addEventListener('abort', onAbort, { once: true });
         failure.interaction_write_started = true;
         const { error } = await withTimeout(Promise.race([
-          Promise.resolve(createAdminClient().from('interactions').insert({
+          Promise.resolve(createAdminClient(enterprise ? 'enterprise' : 'personal').from('interactions').insert({
             id: interactionId, project_id: projectId.trim(), query_text: userQuery,
             user_id: user.id,
             retrieved_chunk_ids: relevantChunks.map((c) => c.id),
@@ -329,10 +435,11 @@ export async function POST(req: Request) {
       if (relevantChunks.length) {
         const result = await generateText({
           model: google(generationModelId), system: systemPrompt, messages,
-          maxOutputTokens: 750, maxRetries: 0, abortSignal: AbortSignal.any([req.signal, AbortSignal.timeout(35000)]),
+          maxOutputTokens: 1000, maxRetries: 0, abortSignal: AbortSignal.any([req.signal, AbortSignal.timeout(35000)]),
         });
         text = result.text;
         finishReason = result.finishReason;
+        failure.model_finish_reason = finishReason;
         updateUsage(result.usage);
       }
       text = await prepareEnterpriseAnswer(text, finishReason, req.signal);
@@ -383,7 +490,7 @@ export async function POST(req: Request) {
             let modelStreamErrored = false;
             const result = streamText({
               model: google(generationModelId), system: systemPrompt, messages,
-              maxOutputTokens: 750, maxRetries: 0,
+              maxOutputTokens: 1000, maxRetries: 0,
               abortSignal: generationSignal,
               // The SDK filters error parts out of textStream; retain their origin without raw logging.
               onError: ({ error }) => {
@@ -394,6 +501,8 @@ export async function POST(req: Request) {
             stage = 'model_stream_iteration';
             for await (const delta of result.textStream) {
               if (text.length + delta.length > MAX_ANSWER_CHARS) {
+                failure.answer_length_failed = true;
+                if (enterprise) failure.enterprise_rejection_reason = 'answer_length_exceeded';
                 recordFailure('answer_validation', undefined, 'answer_too_long');
                 streamAbort.abort();
                 throw new Error('Answer exceeds the length limit.');
@@ -416,6 +525,7 @@ export async function POST(req: Request) {
             stage = 'model_stream_finalization';
             updateUsage(await result.usage);
             finishReason = await result.finishReason;
+            failure.model_finish_reason = finishReason;
             failure.model_stream_completed = !modelStreamErrored && !generationSignal.aborted;
           }
           const signal = AbortSignal.any([req.signal, streamAbort.signal]);

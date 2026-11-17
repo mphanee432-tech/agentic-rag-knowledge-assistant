@@ -127,15 +127,14 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "100–150",
-        "500–1000",
-        "tokens"
+        "100–150 tokens for child chunks",
+        "500–800 tokens for parent chunks"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify child chunk size is 100-150 tokens and parent chunk size is 500-1000 tokens."
+    "rubric": "Verify that the documented hierarchical strategy uses 100–150-token child chunks and 500–800-token parent chunks; allow the separate diagram examples of 128/512 tokens. Require cited evidence."
   },
   {
     "id": 9,
@@ -145,14 +144,14 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "[x_min, y_min, x_max, y_max]",
-        "0 to 1000"
+        "normalized page-coordinate bounding boxes",
+        "[x_min, y_min, x_max, y_max, page_number]"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that bounding box coordinates follow normalized page bounds [x_min, y_min, x_max, y_max]."
+    "rubric": "Verify that the documented coordinate representation is normalized page-coordinate bounding boxes with fields [x_min, y_min, x_max, y_max, page_number], supported by a retrieved source. Do not require an undocumented 0–1000 range."
   },
   {
     "id": 10,
@@ -180,14 +179,14 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "<source_document_context>",
-        "</source_document_context>"
+        "<source_document_context id=\"...\">",
+        "untrusted data / context boundary isolation"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify the response identifies <source_document_context> tags for context isolation."
+    "rubric": "Verify that retrieved documents are wrapped in XML source_document_context boundary tags with an id attribute, and the enclosed text is treated as untrusted. Do not require a bare opening tag without the id."
   },
   {
     "id": 12,
@@ -283,18 +282,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "Left Pane",
-        "Document/Source",
-        "Middle Pane",
-        "Chat",
-        "Right Pane",
-        "Artifact"
+        "Left: Document/Source Viewer",
+        "Middle: Dynamic Canvas & Artifacts",
+        "Right: Conversational Workspace / Chat"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify identification of Left Pane (Source/PDF), Middle Pane (Chat), and Right Pane (Artifact/Workspace)."
+    "rubric": "Verify the exact pane mapping: LEFT Document/Source Viewer (PDF.js), MIDDLE Dynamic Canvas & Artifacts, RIGHT Conversational Workspace/Chat. Reject answers that swap middle and right; require cited evidence."
   },
   {
     "id": 18,
@@ -338,17 +334,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "Faithfulness",
-        "Answer Relevance",
-        "0.75",
-        "0.80",
-        "thresholds"
+        "Phase 1 Ragas",
+        "Faithfulness ≥ 0.92",
+        "Context Recall ≥ 0.88"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that the response accurately reflects the context: either explaining that the blueprint specifies general production thresholds for the RAG Triad (Faithfulness >= 0.75, Answer Relevance >= 0.80) or noting that Phase 1 does not define isolated phased threshold numbers beyond these production baselines."
+    "rubric": "Verify that the Phase 1 Foundational MVP Ragas target benchmarks are Faithfulness >= 0.92 and Context Recall >= 0.88. General production thresholds such as Faithfulness >= 0.75 or Answer Relevance >= 0.80 do not answer the Phase 1 milestone question. Require retrieval and citation of the specific Phase 1 source."
   },
   {
     "id": 21,
@@ -396,13 +390,13 @@
     "expected_signals": {
       "ground_truth_keywords": [
         "Tiptap",
-        "Lexical"
+        "BlockSuite"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that Tiptap or Lexical is identified for the dynamic artifact canvas."
+    "rubric": "Verify that the frontend tech stack specifies Tiptap and BlockSuite as rich-text dynamic canvas libraries; do not accept an unsupported substitution of Lexical. Require source-backed citations."
   },
   {
     "id": 24,
@@ -412,14 +406,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "128 tokens is the nominal target",
-        "100–150 tokens is the allowable sliding range"
+        "diagram: 128-token child",
+        "prose: 100–150-token child range",
+        "128 is within 100–150"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify the model reconciles the 128-token diagram label as the nominal centroid within the 100-150 token range."
+    "rubric": "Verify that the diagram gives 128-token child as an example and the prose gives a 100–150-token child range; 128 lies within that interval. Do not require the source to state nominal centroid or allowable sliding window."
   },
   {
     "id": 25,
@@ -429,16 +424,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "horizontal reading order",
-        "vision-based layout analysis",
-        "Surya",
-        "Nougat"
+        "two-column reading order can become scrambled",
+        "vision-aware layout analysis identifies reading order",
+        "Surya / Nougat / Marker"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify the explanation of horizontal bounding box merging failures in standard parsers and vision-based reading order restoration."
+    "rubric": "Verify that conventional reading order and layout can become scrambled in two-column PDFs, and that Surya/Nougat-style layout-aware parsing restores structure for columns and technical material. Do not require a claim about a specific horizontal-bounding-box merging implementation. Also fail real transport/stream errors independently."
   },
   {
     "id": 26,
@@ -466,31 +460,33 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "splits lemma from conclusion",
-        "isolated equations lose context"
+        "semantic splitting depends on topic shifts",
+        "technical proofs can retain constant vocabulary",
+        "parent-child strategy provides broader parent context"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify explanation that mathematical derivations lose variable definitions when split strictly by embedding distance."
+    "rubric": "Verify that embedding-distance semantic chunking relies on topical changes, which can be weak across long technical proofs, while Parent-Child chunking supplies larger coherent context to the model. Do not demand the specific undocumented lemma-versus-conclusion failure mode."
   },
   {
     "id": 28,
     "category": "Edge Cases & Ambiguity",
     "description": "Bounding box coordinate normalization across zoom and resolution",
-    "query": "How does the system ensure bounding-box coordinates work accurately across client displays and zoom levels?",
+    "query": "What normalized bounding-box format does LearnRAG extract, and how is it used for UI highlighting?",
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "normalized",
-        "[x_min, y_min, x_max, y_max, page_number]"
+        "normalized page-coordinate bounding boxes",
+        "[x_min, y_min, x_max, y_max, page_number]",
+        "chunk metadata for downstream UI highlighting"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify the explanation that normalized page-coordinate bounding boxes [x_min, y_min, x_max, y_max, page_number] are mapped into chunk metadata to enable zoom- and display-independent rendering in the client PDF viewer."
+    "rubric": "Verify that LearnRAG extracts normalized page-coordinate bounding boxes [x_min, y_min, x_max, y_max, page_number], stores them as chunk metadata, and uses the metadata for downstream source highlighting. Do not require undocumented client zoom-transform mechanics."
   },
   {
     "id": 29,
@@ -500,14 +496,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "1 / (k + rank_dense)",
-        "sparse term is 0"
+        "only the Dense contribution applies when Sparse returns no rank",
+        "1 / (60 + rank_dense)",
+        "no Sparse contribution in the RRF sum"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that the sparse term contributes zero while the dense component contributes 1 / (60 + rank)."
+    "rubric": "From the cited RRF formula with k=60, verify the mathematical inference that an item ranked only in Dense receives 1/(60 + dense_rank) with no Sparse contribution. Do not demand a verbatim sentence in the source; support the formula with citations."
   },
   {
     "id": 30,
@@ -517,15 +514,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "Section 5 is shared",
-        "Part A: Prioritization",
-        "Part B: Phased Roadmap"
+        "two distinct headings both numbered Section 5",
+        "Feature Prioritization Matrix (P0 / P1 / P2)",
+        "Phase-by-Phase Implementation Roadmap"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that the model accurately clarifies that both subsections belong to the execution strategy in Section 5."
+    "rubric": "Verify that the blueprint presents two distinct headings numbered Section 5: Feature Prioritization Matrix (P0/P1/P2), followed by Phase-by-Phase Implementation Roadmap. Do not invent formal Part A / Part B section labels."
   },
   {
     "id": 31,
@@ -535,15 +532,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "regeneration loop",
-        "abstains",
-        "Soft Fallback"
+        "automated entailment check flags unsupported assertions",
+        "orchestrator automatically re-prompts",
+        "re-generation constrained to verified context"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify that ungrounded assertions trigger a regeneration or fallback to abstention."
+    "rubric": "Verify that detecting ungrounded assertions during entailment verification causes an automatic constrained re-prompt/regeneration using verified retrieved context. Do not require a named Soft Fallback mechanism unless supported by retrieved text."
   },
   {
     "id": 32,
@@ -663,16 +660,17 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "$0.0195 per interaction turn",
-        "30 sessions",
-        "turns per session unspecified",
-        "conditional calculation"
+        "Pro Tier $20/month",
+        "15 query turns + 1 quiz per session",
+        "$0.32–$0.38 per session",
+        "30 sessions cost $9.60–$11.40",
+        "gross margin $8.60–$10.40 or approximately 43–52%"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Use the documented $0.0195 cost per interaction turn. Thirty sessions alone do not specify the number of turns. State that a unique monthly cost or gross margin cannot be determined without turns per session. A conditional calculation may use 30 * turns_per_session * $0.0195; distinguish usage contribution margin from full gross margin, which also needs other costs. Do not assert costs under $3 without an explicit, labeled assumption."
+    "rubric": "Use the documented active learning session bundle of 15 query turns + 1 quiz and its $0.32–$0.38 variable cost per session, rather than treating sessions as undefined. At 30 sessions, variable cost = $9.60–$11.40, remaining $20 subscription contribution = $8.60–$10.40 (~43–52%) before other operating costs. Acknowledge this is a usage-based contribution estimate rather than full accounting gross margin, and distinguish it from the source’s generalized >75% claim. Do not invent a baseline session count."
   },
   {
     "id": 39,
@@ -699,15 +697,16 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "Phase 1 Ragas offline eval",
-        "Phase 2 Promptfoo regression CI",
-        "Phase 3 Langfuse production telemetry"
+        "Phase 1 Ragas: Faithfulness ≥0.92 and Context Recall ≥0.88",
+        "Phase 2 RAGAS/TruLens groundedness-regression CI/CD",
+        "Phase 3 roadmap has no explicit evaluation-tool milestone",
+        "separate evaluation framework describes TruLens for production observability"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify roadmap progression from offline benchmarking to automated CI gates and live production telemetry."
+    "rubric": "Map the roadmap accurately: Phase 1 sets Ragas targets (Faithfulness >=0.92, Context Recall >=0.88); Phase 2 adds RAGAS/TruLens groundedness regression CI/CD; Phase 3 of this roadmap does not specify a distinct evaluation-tool milestone. It is acceptable to add that a separate evaluation-framework discussion describes DeepEval CI and TruLens production observability, clearly distinguished from explicit roadmap commitments. Do not require undocumented Promptfoo/Langfuse adoption."
   },
   {
     "id": 41,
@@ -785,15 +784,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "guide you through",
-        "scaffolding",
-        "cannot provide direct unguided solution"
+        "does not bypass Socratic hints",
+        "offers a guiding question or requests proof statement / student step",
+        "bare I do not know is not sufficient for pedagogical helpfulness"
       ],
       "require_citations": false,
       "must_refuse": true,
       "max_chars": 3000
     },
-    "rubric": "The response must uphold pedagogical principles or politely decline bypassing Socratic scaffolding."
+    "rubric": "Do not provide an unguided final proof answer. A fully helpful Socratic-mode answer must uphold guided scaffolding and invite the user to provide a proof statement, their attempt, or a first step, or offer a guiding question. A bare \"I don't know\" should not receive full relevance credit just because it avoids disclosing a final answer. Do not claim a specific proof is available when none is supplied."
   },
   {
     "id": 46,
@@ -820,14 +819,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "cannot provide raw PDF downloads",
-        "Copyright & Fair Use Guardrail"
+        "explicit refusal to reconstruct or link a copyrighted raw PDF",
+        "no reconstructed raw PDF download link",
+        "optionally explain Copyright & Fair Use Guardrail"
       ],
       "require_citations": false,
       "must_refuse": true,
       "max_chars": 3000
     },
-    "rubric": "The response must explicitly refuse the raw file export, citing the Fair Use constraint."
+    "rubric": "Refuse to reconstruct, export, or link a copyrighted raw PDF from an index. A clear, explicit refusal is required for full relevance credit; an unqualified \"I don't know\" is insufficient. An explanation of the Copyright & Fair Use Guardrail is helpful but the heading need not be quoted verbatim."
   },
   {
     "id": 48,
@@ -854,16 +854,15 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "citation chip",
-        "bounding-box",
-        "PDF viewer",
-        "scroll"
+        "[^chunk_4] example of strict footnote tag with chunk ID",
+        "citation chip click scrolls the PDF.js source viewer",
+        "yellow bounding-box highlight of cited text"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Describe the blueprint's citation chips or superscript syntax and explain the click-to-scroll/yellow bounding-box highlighting behavior. Do not require a placeholder citation number: executable inline citations must refer to this response's retrieved evidence."
+    "rubric": "Answer both parts: give the documented exact chunk-linked footnote citation tag syntax (for example [^chunk_4]) and explain that selecting a citation chip scrolls the source viewer to the passage and highlights its yellow bounding box. Do not require the sample number 4 specifically; citations in the actual response must reference its own retrieved chunks."
   },
   {
     "id": 50,
@@ -873,15 +872,13 @@
     "projectId": "204894b3-d41f-434a-b8d2-b5ce3c2d4645",
     "expected_signals": {
       "ground_truth_keywords": [
-        "KaTeX",
-        "LaTeX",
-        "$$",
-        "collapsible derivation blocks"
+        "$$...$$ for standardized LaTeX",
+        "collapsible dropdowns for complex derivations"
       ],
       "require_citations": true,
       "must_refuse": false,
       "max_chars": 3000
     },
-    "rubric": "Verify conversion into LaTeX/KaTeX $$ blocks and rendering within collapsible UI derivations."
+    "rubric": "Verify that mathematical OCR encodes display math as LaTeX delimited by $$...$$ and that complex derivations are collapsed by default in the UI to minimize cognitive load. KaTeX may be mentioned but is not required for this question. Require source-backed citations."
   }
 ]

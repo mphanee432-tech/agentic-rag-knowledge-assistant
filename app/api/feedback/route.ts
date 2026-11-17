@@ -1,7 +1,7 @@
 import { apiError, HttpError, requireProject, requireUser } from "@/lib/auth"
 export async function POST(req: Request) {
   try {
-    const { supabase } = await requireUser(req)
+    const { supabase } = await requireUser(req, "personal")
     const { interactionId, rating, issueTag, comment } = await req.json()
     if (typeof interactionId !== "string" || !["thumbs_up", "thumbs_down"].includes(rating) ||
         (comment != null && (typeof comment !== "string" || comment.length > 2000)) ||

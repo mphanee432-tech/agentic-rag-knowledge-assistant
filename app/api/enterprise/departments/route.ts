@@ -8,7 +8,7 @@ export async function GET(req: Request) {
       throw new HttpError(400, "A valid organization ID is required.")
     }
 
-    const { supabase } = await requireUser(req)
+    const { supabase } = await requireUser(req, "enterprise")
 
     const { data: depts, error: deptsErr } = await supabase.rpc("enterprise_policy_departments", {
       target_organization_id: organizationId,

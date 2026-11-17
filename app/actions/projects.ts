@@ -5,7 +5,7 @@ import { requireProject, requireUser } from "@/lib/auth"
 import { createAdminClient } from "@/lib/supabase/admin"
 
 export async function createProject(nameOrFormData?: string | FormData) {
-  const { supabase, user } = await requireUser()
+  const { supabase, user } = await requireUser(undefined, "personal")
   const raw = typeof nameOrFormData === "string" ? nameOrFormData : nameOrFormData?.get("name")
   const name = typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 60) : "Untitled Project"
   const id = crypto.randomUUID()

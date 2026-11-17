@@ -1,0 +1,17 @@
+diff --git a/scripts/eval_runner.py b/scripts/eval_runner.py
+--- a/scripts/eval_runner.py
++++ b/scripts/eval_runner.py
+@@ -448,10 +448,11 @@ def evaluate_query(
+     auth = auth if auth is not None else EvaluationAuth(endpoint)
+     auth.get_token()
+     t0 = time.perf_counter()
+-    errors = []
+     retries = {"embedding": 0, "retrieval": 0, "generation": 0, "request": 0}
+-    trace_errors = set()
+     for attempt in range(2):
++        # Judge the final attempt; earlier failures are already counted as retries.
++        errors = []
++        trace_errors = set()
+         response_valid = False
+         embed_ms = retrieval_ms = ttft_ms = total_ms = 0.0
+         output_text = context_text = ""

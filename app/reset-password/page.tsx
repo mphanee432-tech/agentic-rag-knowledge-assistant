@@ -4,13 +4,17 @@ import { Suspense, useEffect, useState, type FormEvent } from "react"
 import Link from "next/link"
 import { useSearchParams } from "next/navigation"
 import { createBrowserClient } from "@/lib/supabase/client"
+import { isDualProjectConfigured, normalizeWorkspaceScope, type WorkspaceScope } from "@/lib/supabase/config"
 import { useChatStore } from "@/lib/store/chat-store"
 
 type RecoveryStatus = "checking" | "ready" | "invalid" | "success"
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams()
+  const requestedWorkspaceParam = searchParams.get("workspace")
+  const initialWorkspace = normalizeWorkspaceScope(requestedWorkspaceParam, "personal")
   const hasLinkError = Boolean(searchParams.get("error") || searchParams.get("error_code"))
+  const [resolvedWorkspace, setResolvedWorkspace] = useState<WorkspaceScope>(initialWorkspace)
   const [status, setStatus] = useState<RecoveryStatus>("checking")
   const [error, setError] = useState("")
   const [pending, setPending] = useState(false)
@@ -23,15 +27,26 @@ function ResetPasswordForm() {
 
     async function verifyRecoverySession() {
       try {
-        const supabase = createBrowserClient()
-        const { data, error: userError } = await supabase.auth.getUser()
-        if (!active) return
-        if (userError || !data.user) {
-          setStatus("invalid")
-          setError("This password reset link is invalid or has expired. Please request a new one.")
-          return
+        const candidates: WorkspaceScope[] =
+          requestedWorkspaceParam === "personal" || requestedWorkspaceParam === "enterprise"
+            ? [requestedWorkspaceParam]
+            : isDualProjectConfigured()
+              ? ["personal", "enterprise"]
+              : ["personal"]
+
+        for (const candidate of candidates) {
+          const supabase = createBrowserClient(candidate)
+          const { data, error: userError } = await supabase.auth.getUser()
+          if (!active) return
+          if (!userError && data.user) {
+            setResolvedWorkspace(candidate)
+            setStatus("ready")
+            return
+          }
         }
-        setStatus("ready")
+
+        setStatus("invalid")
+        setError("This password reset link is invalid or has expired. Please request a new one.")
       } catch {
         if (!active) return
         setStatus("invalid")
@@ -43,7 +58,7 @@ function ResetPasswordForm() {
     return () => {
       active = false
     }
-  }, [hasLinkError])
+  }, [hasLinkError, requestedWorkspaceParam])
 
   const effectiveStatus: RecoveryStatus = hasLinkError ? "invalid" : status
   const effectiveError = hasLinkError
@@ -69,13 +84,13 @@ function ResetPasswordForm() {
 
     setPending(true)
     try {
-      const supabase = createBrowserClient()
+      const supabase = createBrowserClient(resolvedWorkspace)
       const { error: updateError } = await supabase.auth.updateUser({ password })
       if (updateError) {
         setError(updateError.message || "Unable to update password. Please request a new reset link.")
         return
       }
-      await supabase.auth.signOut().catch(() => null)
+      await supabase.auth.signOut({ scope: "local" }).catch(() => null)
       useChatStore.getState().setAccount(null)
       setStatus("success")
     } catch {
@@ -99,7 +114,7 @@ function ResetPasswordForm() {
             <p role="alert" className="text-sm text-destructive">
               {effectiveError}
             </p>
-            <Link href="/login" className="inline-block border rounded px-4 py-2 text-sm">
+            <Link href={`/login?workspace=${resolvedWorkspace}`} className="inline-block border rounded px-4 py-2 text-sm">
               Return to sign in
             </Link>
           </div>
@@ -148,7 +163,7 @@ function ResetPasswordForm() {
             <p role="status" className="text-sm">
               Your password has been updated. You can now sign in with your new password.
             </p>
-            <Link href="/login" className="inline-block border rounded px-4 py-2 text-sm">
+            <Link href={`/login?workspace=${resolvedWorkspace}`} className="inline-block border rounded px-4 py-2 text-sm">
               Return to sign in
             </Link>
           </div>

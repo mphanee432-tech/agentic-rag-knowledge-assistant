@@ -1,4 +1,4 @@
-import { apiError, getEnterpriseCopilotContext, HttpError, requireUser } from "@/lib/auth"
+import { apiError, HttpError, requireJiraAccess, requireUser } from "@/lib/auth"
 import { fetchLiveJiraOptions } from "@/lib/jira-options"
 import {
   getAllowedJiraProject,
@@ -8,7 +8,7 @@ import {
 
 export async function POST(req: Request) {
   try {
-    const { supabase } = await requireUser(req)
+    const { supabase } = await requireUser(req, "enterprise")
     if (req.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       throw new HttpError(415, "Send ticket details as JSON.")
     }
@@ -23,9 +23,6 @@ export async function POST(req: Request) {
     const rawIssueTypeId = body?.issueTypeId
     const assigneeId = typeof body?.assigneeId === "string" ? body.assigneeId.trim() : ""
     const priorityId = typeof body?.priorityId === "string" ? body.priorityId.trim() : ""
-    if (typeof organizationId !== "string" || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(organizationId)) {
-      throw new HttpError(400, "A valid organization ID is required.")
-    }
     if (!summary || summary.length > JIRA_SUMMARY_MAX || /[\r\n]/.test(summary)) {
       throw new HttpError(400, `Enter a single-line summary of up to ${JIRA_SUMMARY_MAX} characters.`)
     }
@@ -35,18 +32,16 @@ export async function POST(req: Request) {
     if (!/^\d+$/.test(projectId)) {
       throw new HttpError(400, "Select a supported Jira project.")
     }
+    await requireJiraAccess(supabase, organizationId)
     if (!getAllowedJiraProject(projectId)) {
       throw new HttpError(403, "Selected Jira project is not authorized.")
-    }
-    if (!await getEnterpriseCopilotContext(supabase, organizationId)) {
-      throw new HttpError(403, "Active membership in this organization is required.")
     }
 
     const liveOptions = await fetchLiveJiraOptions(projectId)
     const issueTypeId = rawIssueTypeId === undefined
       ? liveOptions.issueTypes.find((option) => option.name.toLowerCase() === "task")?.id ??
-        liveOptions.issueTypes[0]?.id ??
-        ""
+      liveOptions.issueTypes[0]?.id ??
+      ""
       : typeof rawIssueTypeId === "string"
         ? rawIssueTypeId.trim()
         : ""

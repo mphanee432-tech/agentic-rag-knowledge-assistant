@@ -14,7 +14,7 @@ export async function POST(req: Request) {
     // Standard personal upload: preserve original behavior & error contract exactly
     if (classification === undefined && organizationId === undefined && departmentId === undefined) {
       const { project, user } = await requireProject(projectId, req)
-      const admin = createAdminClient()
+      const admin = createAdminClient("personal")
       const documentId = crypto.randomUUID()
       const storagePath = `${user.id}/${project.id}/${documentId}/${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}`
       const { error } = await admin.from("documents").insert({
@@ -34,7 +34,7 @@ export async function POST(req: Request) {
     }
 
     // Enterprise policy upload flow: verify enterprise uploader authorization in PostgreSQL
-    const auth = await requireUser(req)
+    const auth = await requireUser(req, "enterprise")
     const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
     if (typeof organizationId !== "string" || !uuid.test(organizationId) ||
         typeof departmentId !== "string" || !uuid.test(departmentId)) {
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
     }
     const { project_id: reservedProjectId, storage_path: storagePath } = reservation
 
-    const admin = createAdminClient()
+    const admin = createAdminClient("enterprise")
     const { data, error: uploadError } = await admin.storage.from("documents").createSignedUploadUrl(storagePath)
     if (uploadError || !data) {
       await admin.from("documents").update({ status: "failed" }).eq("id", documentId)

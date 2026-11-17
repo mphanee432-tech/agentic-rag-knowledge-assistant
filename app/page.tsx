@@ -2,11 +2,19 @@ import {
   FolderPlus,
   ShieldCheck,
   Database,
+  Building2,
+  Lock,
 } from "lucide-react"
+import { isDualProjectConfigured } from "@/lib/supabase/config"
 import { createServerClient } from "@/lib/supabase/server"
-import { getEnterpriseCopilotContext } from "@/lib/auth"
+import { getDemoJiraAccess, getEnterpriseAccountStatus, getEnterpriseCopilotContext } from "@/lib/auth"
+import { buildAccountSummary } from "@/lib/account-summary"
 import { redirect } from "next/navigation"
+import { AccountSummary } from "@/components/account-summary"
+import { EnterpriseOnboardCard } from "@/components/enterprise-onboard-card"
+import { DemoJiraCard } from "@/components/jira/jira-ticket-draft"
 import { ProjectWorkspaceClient } from "@/components/chat/project-workspace-client"
+import { WorkspaceTabs, type WorkspaceTab } from "@/components/workspace-tabs"
 import { SignOut } from "@/components/sign-out"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { Button } from "@/components/ui/button"
@@ -21,19 +29,108 @@ interface RawProjectRecord {
   documents?: Array<{ count: number }>
 }
 
-export default async function DashboardPage() {
-  const supabase = await createServerClient()
+interface DashboardPageProps {
+  searchParams?:
+  | Promise<{ tab?: string | string[]; enrolled?: string | string[] }>
+  | { tab?: string | string[]; enrolled?: string | string[] }
+}
+
+export default async function DashboardPage({ searchParams }: DashboardPageProps = {}) {
+  const resolvedSearchParams = await Promise.resolve(searchParams)
+  const rawTab = Array.isArray(resolvedSearchParams?.tab)
+    ? resolvedSearchParams?.tab[0]
+    : resolvedSearchParams?.tab
+  const rawEnrolled = Array.isArray(resolvedSearchParams?.enrolled)
+    ? resolvedSearchParams?.enrolled[0]
+    : resolvedSearchParams?.enrolled
+  const activeTab: WorkspaceTab = rawTab === "enterprise" ? "enterprise" : "personal"
+  const enrolled = rawEnrolled === "1"
+
+  const supabase = await createServerClient(activeTab)
   const {
     data: { user },
   } = await supabase.auth.getUser()
 
-  if (!user) redirect("/login")
-  const enterprise = await getEnterpriseCopilotContext(supabase)
-  if (enterprise) return <ProjectWorkspaceClient
-    userId={user.id}
-    organizationId={enterprise.organization_id}
-    canUploadPolicy={enterprise.can_upload_policy}
-  />
+  if (!user) {
+    redirect(activeTab === "enterprise" ? "/login?workspace=enterprise" : "/login?workspace=personal")
+  }
+  const shouldLoadEnterpriseMeta = activeTab === "enterprise" || !isDualProjectConfigured()
+  const [enterprise, accountStatus, demoJiraAccess] = shouldLoadEnterpriseMeta
+    ? await Promise.all([
+      getEnterpriseCopilotContext(supabase),
+      getEnterpriseAccountStatus(supabase),
+      getDemoJiraAccess(supabase).catch(() => false),
+    ])
+    : [null, null, false]
+  const accountSummary = buildAccountSummary({
+    email: user.email,
+    enterprise,
+    accountStatus,
+    demoJiraAccess,
+  })
+  if (activeTab === "enterprise") {
+    if (enterprise) {
+      return (
+        <ProjectWorkspaceClient
+          userId={user.id}
+          organizationId={enterprise.organization_id}
+          canUploadPolicy={enterprise.can_upload_policy}
+          accountSummary={accountSummary}
+          enrolled={enrolled}
+        />
+      )
+    }
+
+    return (
+      <div className="min-h-screen w-full flex flex-col bg-background text-foreground">
+        <header className="px-4 sm:px-6 py-3 sm:py-4 border-b border-border bg-card/60 backdrop-blur-sm flex flex-wrap items-center justify-between gap-3 sticky top-0 z-20">
+          <div className="flex flex-wrap items-center gap-3 sm:gap-4 w-full lg:w-auto min-w-0">
+            <div className="flex items-center gap-3">
+              <div className="size-9 rounded-xl bg-primary text-primary-foreground flex items-center justify-center font-bold text-sm shadow-xs">
+                RAG
+              </div>
+              <div>
+                <h1 className="text-sm font-semibold tracking-tight text-foreground">
+                  Employee Knowledge Copilot
+                </h1>
+                <p className="text-[11px] text-muted-foreground">
+                  Enterprise Knowledge Base &amp; Policy Search
+                </p>
+              </div>
+            </div>
+            <WorkspaceTabs activeTab="enterprise" />
+          </div>
+
+          <div className="flex items-center gap-3">
+            <SignOut workspace="enterprise" />
+            <ThemeToggle />
+          </div>
+        </header>
+        <AccountSummary account={accountSummary} />
+
+        <main className="flex-1 flex flex-col p-6 md:p-12 max-w-6xl w-full mx-auto">
+          {accountSummary.jiraAccessAvailable && <DemoJiraCard />}
+          <div
+            role="status"
+            aria-label="Enterprise access notice"
+            className="flex-1 flex flex-col items-center justify-center text-center my-auto py-16"
+          >
+            <div className="size-16 rounded-3xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-500 mb-5 shadow-xs">
+              <Lock className="size-8" aria-hidden="true" />
+            </div>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-700 dark:text-amber-400 mb-3">
+              <Building2 className="size-3.5" aria-hidden="true" />
+              <span>Enterprise RAG Restricted</span>
+            </div>
+            <p className="text-base font-medium text-foreground max-w-md">
+              You don&apos;t have active enterprise access. Contact your administrator.
+            </p>
+            {!accountStatus && <EnterpriseOnboardCard />}
+          </div>
+        </main>
+      </div>
+    )
+  }
 
   const { data, error } = await supabase.from("projects")
     .select("id, name, user_id, created_at, documents(count)")
@@ -53,30 +150,35 @@ export default async function DashboardPage() {
   return (
     <div className="min-h-screen w-full flex flex-col bg-background text-foreground">
       {/* Navigation Header */}
-      <header className="px-6 py-4 border-b border-border bg-card/60 backdrop-blur-sm flex items-center justify-between sticky top-0 z-20">
-        <div className="flex items-center gap-3">
-          <div className="size-9 rounded-xl bg-primary text-primary-foreground flex items-center justify-center font-bold text-sm shadow-xs">
-            RAG
+      <header className="px-4 sm:px-6 py-3 sm:py-4 border-b border-border bg-card/60 backdrop-blur-sm flex flex-wrap items-center justify-between gap-3 sticky top-0 z-20">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4 w-full lg:w-auto min-w-0">
+          <div className="flex items-center gap-3">
+            <div className="size-9 rounded-xl bg-primary text-primary-foreground flex items-center justify-center font-bold text-sm shadow-xs">
+              RAG
+            </div>
+            <div>
+              <h1 className="text-sm font-semibold tracking-tight text-foreground">
+                Knowledge Assistant Dashboard
+              </h1>
+              <p className="text-[11px] text-muted-foreground">
+                Tenant-Isolated Technical Vector Workspaces
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-sm font-semibold tracking-tight text-foreground">
-              Knowledge Assistant Dashboard
-            </h1>
-            <p className="text-[11px] text-muted-foreground">
-              Tenant-Isolated Technical Vector Workspaces
-            </p>
-          </div>
+          <WorkspaceTabs activeTab="personal" />
         </div>
 
         <div className="flex items-center gap-3">
           {!isEmpty && <CreateProjectDialog />}
-          <SignOut />
+          <SignOut workspace="personal" />
           <ThemeToggle />
         </div>
       </header>
+      <AccountSummary account={accountSummary} />
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col p-6 md:p-12 max-w-6xl w-full mx-auto">
+        {!enterprise && accountSummary.jiraAccessAvailable && <DemoJiraCard />}
         {isEmpty && (
           /* Empty State: Clean, centered layout with folder icon, descriptive text, and primary create button */
           <div className="flex-1 flex flex-col items-center justify-center text-center my-auto py-16">

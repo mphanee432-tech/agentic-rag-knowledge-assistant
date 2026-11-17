@@ -3,7 +3,7 @@ export { citationIndices, validCitations } from "./citations"
 
 export const NO_EVIDENCE = "I don't know."
 export const ENTERPRISE_NO_EVIDENCE = "I don't know based on the documents I can access."
-export const MAX_ANSWER_CHARS = 3000
+export const MAX_ANSWER_CHARS = 4000
 
 export function isNoEvidenceAnswer(text: string): boolean {
   const normalized = text.trim()

@@ -13,7 +13,7 @@ import {
  */
 export async function POST(req: Request) {
   try {
-    const { supabase } = await requireUser(req)
+    const { supabase } = await requireUser(req, "enterprise")
     if (req.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
       throw new HttpError(415, "Send status lookup details as JSON.")
     }
