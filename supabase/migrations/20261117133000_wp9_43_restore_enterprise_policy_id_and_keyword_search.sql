@@ -1,3 +1,32 @@
+begin;
+set local lock_timeout = '5s';
+
+grant create on schema wp3_private to wp3_retrieval;
+
+create or replace function wp3_private.search_chunks(
+  query_embedding extensions.vector,
+  query_text text,
+  target_project_id uuid,
+  target_organization_id uuid
+)
+returns table (id uuid, content text)
+language sql stable security definer
+set search_path = pg_catalog, pg_temp
+set row_security = on
+as $$
+  with raw_eligible as materialized (
+    select
+      c.id,
+      c.document_id,
+      c.content,
+      c.embedding,
+      c.fts,
+      case
+        when target_organization_id is not null
+          and left(c.content, 800) ~* '(DOCUMENT CONTROL|Policy introduction and control|Classification\s*(/|:))'
+        then upper((regexp_match(left(c.content, 300), '\m(D(?:0[1-9]|1[0-2]))\M', 'i'))[1])
+        else null
+      end as opening_policy_id
     from public.document_chunks c
     where (c.project_id = target_project_id
       or c.project_id in (select wp3_private.organization_projects(target_organization_id)))

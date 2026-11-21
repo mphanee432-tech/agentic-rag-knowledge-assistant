@@ -214,6 +214,14 @@ test("WP9.43 proposed SQL migration preserves RLS, policy-ID opening boost, and 
     new URL("../supabase/migrations/20261117133000_wp9_43_restore_enterprise_policy_id_and_keyword_search.sql", import.meta.url),
     "utf8",
   )
+  assert.match(sql, /^begin;/i)
+  assert.match(sql, /commit;\s*$/i)
+  assert.match(sql, /grant create on schema wp3_private to wp3_retrieval/i)
+  assert.match(sql, /create or replace function wp3_private\.search_chunks\(\s*query_embedding extensions\.vector,\s*query_text text,\s*target_project_id uuid,\s*target_organization_id uuid\s*\)\s*returns table \(id uuid, content text\)\s*language sql stable security definer\s*set search_path = pg_catalog, pg_temp\s*set row_security = on\s*as \$\$/i)
+  assert.equal(sql.match(/\$\$/g)?.length, 2, "Function body must have matching dollar quotes")
+  assert.match(sql, /as \$\$\s*with raw_eligible as materialized \(\s*select/i)
+  assert.match(sql, /case\s*when target_organization_id is not null\s*and left\(c\.content, 800\)/i)
+  assert.match(sql, /end as opening_policy_id\s*from public\.document_chunks c/i)
   assert.match(sql, /set row_security = on/i)
   assert.match(sql, /row_security_active\('public\.document_chunks'\)/i)
   assert.match(sql, /requested_policies as \(/i)
@@ -222,5 +230,8 @@ test("WP9.43 proposed SQL migration preserves RLS, policy-ID opening boost, and 
   assert.match(sql, /target_organization_id is null/i)
   assert.match(sql, /to_tsquery\('simple', string_agg\(quote_literal\(word\), ' \| '/i)
   assert.match(sql, /alter function wp3_private\.search_chunks.*owner to wp3_retrieval/i)
+  assert.match(sql, /revoke create on schema wp3_private from wp3_retrieval/i)
+  assert.match(sql, /revoke all on function wp3_private\.search_chunks\(extensions\.vector, text, uuid, uuid\)\s*from public, anon, authenticated, service_role/i)
+  assert.match(sql, /grant execute on function wp3_private\.search_chunks\(extensions\.vector, text, uuid, uuid\) to session_user/i)
 })
 
