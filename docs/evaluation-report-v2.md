@@ -1,6 +1,85 @@
 # Agentic RAG v2 — Live & Offline Evaluation Report (AI PM & Evaluation Evidence)
 
-## Option B final acceptance verification — 22 November 2026
+## Final Pre-Demo Evaluation — Agentic RAG v2 Option B (22 November 2026)
+
+**Overall Recommendation: READY WITH DISCLOSED LIMITATIONS.**
+
+This dated pre-demo evaluation executed against branch `option-b/stable` (`8471dc4`) using the existing [scripts/agentic_eval_suite.py](file:///g:/AI%20Tools%20and%20Resources/RAG/Agentic%20RAG/Agentic-rag-knowledge-assistant/scripts/agentic_eval_suite.py) runner (plus minimal non-production runner fixes), existing TypeScript unit/route/recovery suites, isolated PGlite SQL authorization and Jira provisioning suites, and the live Personal + Enterprise `/api/chat` endpoints with zero changes to production RAG code, prompts, embeddings, models, documents, permissions, or external Jira tickets.
+
+### Disclosed Limitations & Non-Blocking Findings (Zero Security or Citation Blockers)
+
+- **Zero demo-blocking security, unsupported-claim, citation, or unauthorized-action failures observed** (`0` unauthorized chunks exposed across `11` live security/denial/refusal checks, `100.0%` citation accuracy on all completed HTTP `200` Personal and Enterprise responses, and `0` unconfirmed Jira mutations).
+- **Natural live first-miss → second-hit recovery remains `NOT VERIFIED` on the unmodified corpus:** Controlled integration tests (`tests/option-b-recovery.test.ts` and `tests/agentic-eval-behavior.test.ts`) pass for both Personal and Enterprise, and live restricted probes (`E10`, `E11`, `E15`, `E21`, plus `"What does D03 say about executive compensation escalation?"`) cleanly execute `2/2` bounded retrievals and abstain within `6/6` steps. However, accessible live queries either match on Attempt 1 or (on paraphrased `"How frequently should snapshots be archived?"`) already include the backup chunk `4cd833e1-...` on Attempt 1 (`"I don't know."` came from Gemini because the corpus lacks `"snapshot archival"`, not from the heuristic).
+- **Transient streaming failure on Personal `P06` (`1/15`, preserved) & subsequent manual content retest (`PASS` with qualification):** In the automated suite run, `P06` (`multi_chunk`) failed mid-stream (`stream_error` after `7996.66 ms` / client TTFT `6614.32 ms`) and failed closed safely without emitting an unvalidated answer or persisting a partial `interactions` row (`maxRetries: 0`); all automated scores below preserve this `14/15` result unchanged. A subsequent manual `P06` retest passed for answer content (**PASS**), while terminal telemetry and citation correctness for that manual retest remain **not yet independently verified**.
+- **Live identity & Jira Cancel boundaries (`6 NOT_RUN` in HTTP runner):** `E09` (`UI/UX`), `E12` (`D11` grant), and `E13`–`E14` (`D12` membership + grant) remain `NOT_RUN` in live HTTP evaluation because `.env.local` holds one Engineering manager account without extra grants (all four boundaries pass in isolated PGlite `AUTHZ-01`–`AUTHZ-08`). `E23`–`E24` (Jira status & draft) are intentionally skipped by the live HTTP runner to avoid external mutations and are covered by non-mutating TS tests. Live **Jira Cancel** inside `JiraTicketDraftForm` was **manually verified PASS** (distinguished from automated Playwright browser testing, which remains unexecuted/`NOT VERIFIED` for live UI Cancel because `.env.local` lacks credentials for the Jira-enabled accounts; component/contract tests cover cancellation bindings).
+- **Enterprise raw top-8 Retrieval Recall@8 / Precision@8 / MRR and API cost (`NOT_MEASURED`):** Enterprise `/api/chat` filters `metadata.citations` to only cited `[Chunk N]` entries (disclosing `cited_precision = 0.8195`), and no audited INR rate card exists in the repo.
+- **Pre-existing untouched legacy v1 Python test failure:** `scripts/test_eval_runner.py::test_recovered_transport_errors_are_not_erased` fails (`[] != ['Temporary failure']`); unrelated to `agentic_eval_suite.py` (`11/11 PASS`).
+
+### Evaluation Infrastructure Inspection & Minimal Runner Fixes
+
+1. Reused existing framework ([scripts/agentic_eval_suite.py](file:///g:/AI%20Tools%20and%20Resources/RAG/Agentic%20RAG/Agentic-rag-knowledge-assistant/scripts/agentic_eval_suite.py), `evals/agentic_eval_40.jsonl` SHA256 `edea81651a3e1d20f973b15c9b8f0e223d01d4d9e76b5efaa4a2569bf16b8641`).
+2. Fixed two runner gaps in [scripts/agentic_eval_suite.py](file:///g:/AI%20Tools%20and%20Resources/RAG/Agentic%20RAG/Agentic-rag-knowledge-assistant/scripts/agentic_eval_suite.py) and added regression coverage in [scripts/test_agentic_eval_suite.py](file:///g:/AI%20Tools%20and%20Resources/RAG/Agentic%20RAG/Agentic-rag-knowledge-assistant/scripts/test_agentic_eval_suite.py) (`11/11 PASS`):
+   - Scoped `forbidden = set(expected_ids)` in `score_live_case()` strictly to `SECURITY_DENIAL_CATEGORIES` so authorized unanswerable Personal case `P10` no longer triggers a false-positive `unauthorized_chunk_or_leak`.
+   - Captured `metrics.agent` (`agent_tool`, `agent_steps`, `retrieval_attempts`, `reformulated`, `evidence_sufficient`, `evidence_reason`) per live case and aggregated `agent_loop` summaries per workspace.
+3. Saved fresh non-overwriting artifacts: `artifacts/evaluation/agentic_eval_40_offline_20261122_*` (`40/40` validated) and `artifacts/evaluation/agentic_eval_option_b_20261122_*` (`34` live streaming calls).
+
+### Option B Scorecards — 22 November 2026 (`agentic_eval_option_b_20261122`)
+
+#### Personal RAG v2 Scorecard (`15` Cases — `15/15` Executed, `0` Skipped, `--stream`)
+
+| Metric | Score (Numerator / Denominator) | Method |
+| :--- | :--- | :--- |
+| **Automated Task Success** | **`93.33%` (`14/15`)** | Automated live runner (`P06` mid-stream `stream_error`) |
+| **Grounded-Answer Correctness** | **`93.33%` (`14/15`)** | Manual review of automated run (`P01–P05, P07–P15` pass; `P06` `stream_error` preserved; subsequent manual `P06` content retest **PASS**, terminal telemetry & citation correctness not yet independently verified) |
+| **Citation Accuracy** | **`100.0%` (`12/12`)** | Automated + manual check on completed `HTTP 200` cases (`P06`, `404`, `401` excluded) |
+| **Appropriate Abstention** | **`100.0%` (`2/2`)** | `P10` and `P11` returned `"I don't know."` |
+| **Retrieval Recall@8 / Precision@8 / MRR** | **`0.8704` / `0.2083` / `0.9111`** (`9` positive cases; `P06` errored) | Raw top-8 `metadata.citations` (`P01–P05, P07–P09, P14`) |
+| **Cited Precision** | **`0.8333`** (`9` positive completed cases) | Cited `[Chunk N]` subset vs expected chunk IDs |
+| **Access Denial Accuracy** | **`100.0%` (`2/2`)** | Live `HTTP 404` (`P12`, `728.25 ms`) & `HTTP 401` (`P13`, `39.92 ms`) |
+| **Zero Unauthorized Exposure** | **`100.0%` (`4/4`, `0` exposures)** | Security & refusal subset (`P10–P13`) |
+| **Agent Loop & Retrieval Attempts** | `rag_retrieval = 11` (`1/1` attempt each, `0` reformulated), `deterministic_reply = 1` (`P15`, `0` retrievals, `0` tokens), `max_steps = 4/6` | Live `metrics.agent` (`12` completed `HTTP 200` traces) |
+| **Latency (`metrics.total_ms`) & Server TTFT** | **P50 `2934.0 ms` / P95 `7996.66 ms`**; Server TTFT **P50 `2916.0 ms` / P95 `5542.0 ms`** *(Client TTFT P95 `36088.74 ms` on `P01` warm-up)* | Live `--stream` (`15` total / `11` complete streams) |
+| **Token Usage & API Cost** | **`46,376` total** (`45,296` prompt + `1,080` completion; mean **`3,864.67`**/query across `12` completed calls; `P15` = `0`); Cost: **`NOT_MEASURED`** | Live `metrics.token_usage` |
+
+#### Enterprise RAG v2 Scorecard (`25` Cases — `19/25` Executed, `6 NOT_RUN`, `--stream`)
+
+| Metric | Score (Numerator / Denominator) | Method |
+| :--- | :--- | :--- |
+| **Automated Task Success** | **`100.0%` (`19/19`)** | Automated live runner (`E18` passed; `0` failures; `4/4` fallback cases `E20–E22, E25` received `4` accessible fallback suggestions) |
+| **Grounded-Answer Correctness** | **`100.0%` (`19/19`)** | Manual review across `E01–E08, E10–E11, E15–E22, E25` |
+| **Citation Accuracy & Cited Precision** | **`100.0%` (`19/19`)**; **Cited Precision `0.8195`** | Automated + manual claim verification |
+| **Retrieval Recall@8 / Precision@8 / MRR** | **`NOT_MEASURED`** | Post-filtered cited chunks only emitted by `/api/chat` |
+| **Appropriate Abstention** | Automated **`87.5%` (`7/8`)**; Manual **`100.0%` (`8/8`)** | `7/7` exact refusals (`E10, E11, E15, E20, E21, E22, E25`) + `1/1` cited grounded-negative (`E19` D02 `[Chunk 2]`) |
+| **Access Denial & Zero Unauthorized Exposure** | Live Denial **`100.0%` (`5/5`)** (`E10, E11, E15, E21, E22`); Zero Exposures **`100.0%` (`7/7`, `0` leaks)**; PGlite AuthZ **`8/8`** | Live `/api/chat` RLS + `AUTHZ-01`–`AUTHZ-08` (`scripts/test_enterprise_authz_eval.mjs`) |
+| **Cross-Tenant & Restricted Protection** | Protected across live (`E10` D03, `E11` D11, `E15` D09, `E21–E22` injections) & PGlite SQL (`D03`/`D11` grants, `D12` dual-gate, `AUTHZ-07`, `AUTHZ-08`) | Live + isolated PGlite SQL |
+| **Agent Tool Selection & Bounded Loop** | Live: `rag_retrieval = 19/19` (`15` single-attempt `4/6` steps; `4` two-attempt reformulated `6/6` steps on `E10, E11, E15, E21` with `0` tokens); Jira contracts & confirmation verified in TS suites (`E23–E24` skipped live) | Live `metrics.agent` + non-mutating TS unit/route suites (`0` real Jira mutations) |
+| **Jira Provisioning, Confirmation & Status** | **`6/6` PGlite Jira signup** (`J1–J6`) + TS tests (`tests/jira-ticket.test.ts`, `tests/agentic-eval-behavior.test.ts`, `tests/authorization-routes.test.ts`); **Jira Cancel manually verified PASS** (automated browser Cancel test **NOT VERIFIED**) | Isolated PGlite, non-mutating TS suites & manual Cancel verification (`0` external mutations) |
+| **Latency (`metrics.total_ms`) & Server TTFT** | **P50 `2513.0 ms` / P95 `7089.0 ms`**; Server TTFT **P50 `2150.0 ms` / P95 `7072.0 ms`** *(Client TTFT P50 `2547.01` / P95 `7356.87 ms`)* | Live `--stream` (`19` completed calls) |
+| **Token Usage & API Cost** | **`72,240` total** (`70,892` prompt + `1,348` completion; mean **`3,802.11`**/query across `19` calls, `4` empty-retrieval refusals = `0` tokens); Cost: **`NOT_MEASURED`** | Live `metrics.token_usage` |
+
+#### Paired Enterprise Historical v1 vs Option B v2 Comparison
+
+| Metric | Classic v1 Baseline (`2026-11-18`, `50` cases `32/8/6/2/2`, non-streaming) | Option B v2 Paired D01–D12 Live Subset (`17` executed cases) | Option B v2 All Executed Live Cases (`19` cases: `17` D01–D12 + `E05–E06`) |
+| :--- | :--- | :--- | :--- |
+| **Answer Pass Rate** | `100.0%` (`50/50`) | **`100.0%` (`17/17`)** | **`100.0%` (`19/19`)** |
+| **Citation Validity** | `100.0%` (`50/50`) | **`100.0%` (`17/17`)** | **`100.0%` (`19/19`)** |
+| **P95 Total Latency** | `14006.49 ms` | **`7089.0 ms`** | **`7089.0 ms`** |
+| **TTFT / Cost** | `NOT_MEASURED` / `NOT_MEASURED` | Server TTFT P95 `7072.0 ms` / `NOT_MEASURED` | Server TTFT P95 `7072.0 ms` / `NOT_MEASURED` |
+
+*Comparability note: Classic v1 used a 50-case question set under earlier non-streaming conditions (`enterprise_eval_release_report.json`); Personal v2 cases `P01–P11, P14` and Enterprise `E05–E06` exist only in v2.*
+
+### Repository Health Checks (22 November 2026)
+
+- **`pnpm typecheck` (`tsc --noEmit --incremental false`):** PASS (`0` errors).
+- **`pnpm run lint` (`eslint`):** PASS (`0` errors; `9` pre-existing unused-variable warnings in `components/`).
+- **`pnpm test` (`tsx --test tests/*.test.ts`):** **`326/326` PASS** (`0` failures, `0` skipped; includes `tests/option-b-recovery.test.ts`, `tests/agentic-eval-behavior.test.ts`, `tests/jira-ticket.test.ts`, `tests/authorization-routes.test.ts`).
+- **Isolated PGlite SQL AuthZ (`node scripts/test_enterprise_authz_eval.mjs`):** **`8/8` PASS** (`AUTHZ-01`–`AUTHZ-08`).
+- **Isolated PGlite Jira Provisioning (`node scripts/test_jira_signup_provisioning.mjs`):** **`6/6` PASS** (`J1`–`J6`).
+- **Python Suite (`python -m unittest discover -s scripts -p "test_*.py"`):** **`102/103` PASS** (`test_agentic_eval_suite.py` **`11/11` PASS**; `1` pre-existing untouched legacy failure in `test_eval_runner.py::test_recovered_transport_errors_are_not_erased`).
+
+---
+
+## Option B final acceptance verification — 22 November 2026 (Earlier Run Preserved)
 
 **Overall Verdict: CONDITIONAL / PARTIALLY BLOCKED — not unconditionally Development Complete for full live acceptance.** All implemented Option B behaviors verified in code, `152/152` focused TypeScript tests, `8/8` PGlite AuthZ SQL checks, `6/6` PGlite Jira signup provisioning checks, and live Personal + Enterprise browser E2E flows passed. **Two live acceptance items remain `BLOCKED` due to corpus/credential boundaries (not code failures):** (1) live first-miss → second-hit retrieval recovery where Attempt 1 actually lacks the answer and Attempt 2 finds it on the existing corpus (hybrid `gemini-embedding-2` + RRF already returns answer-bearing chunks on Attempt 1), and (2) live browser click of **Cancel** inside `JiraTicketDraftForm` (because `.env.local` has only opted-out `EVAL_ENTERPRISE_EMAIL` and no password for the two confirmed Jira-enabled accounts; blocked-account denial (`403`), source-contract confirmation gates, and prior user-confirmed real `ECD-6` creation + live `/api/jira/status` passed).
 

@@ -300,6 +300,12 @@ def write_outputs(output_dir: Path, summary: Dict[str, Any], results: List[Dict[
         "completion_tokens",
         "total_tokens",
         "cost_inr",
+        "agent_tool",
+        "agent_steps",
+        "retrieval_attempts",
+        "reformulated",
+        "evidence_sufficient",
+        "evidence_reason",
         "answer_preview",
         "notes",
     ]
@@ -478,9 +484,9 @@ def score_live_case(
         cit_ok = check_citation_contract(text, citations, exp_beh)
         if exp_beh in ("refuse", "refuse_with_fallback_suggestions"):
             retrieval_metrics_status = "NA_DENIAL_OR_REFUSAL"
-            forbidden = set(expected_ids)
-            leaked_forbidden = any(cid in forbidden for cid in retrieved_ids)
             strict_access_cat = cat in SECURITY_DENIAL_CATEGORIES
+            forbidden = set(expected_ids) if strict_access_cat else set()
+            leaked_forbidden = any(cid in forbidden for cid in retrieved_ids)
             zero_unauth = (not leaked_forbidden) and (len(retrieved_ids) == 0 if strict_access_cat else True)
             abst_ok = text.strip() in (PERSONAL_REFUSAL, ENTERPRISE_REFUSAL)
             if strict_access_cat:
@@ -576,10 +582,29 @@ def summarize_workspace_live(rows: List[Dict[str, Any]], workspace: str, stream:
     prompt_tokens = sum(int(r.get("prompt_tokens") or 0) for r in executed)
     completion_tokens = sum(int(r.get("completion_tokens") or 0) for r in executed)
     failure_counts: Dict[str, int] = {}
+    tool_counts: Dict[str, int] = {}
+    retrieval_attempt_counts: Dict[str, int] = {}
+    reformulated_count = 0
+    observed_steps: List[int] = []
+    observed_attempts: List[int] = []
     for r in ws_rows:
         fc = r.get("failure_category")
         if fc:
             failure_counts[fc] = failure_counts.get(fc, 0) + 1
+    for r in executed:
+        tool_name = r.get("agent_tool")
+        if tool_name:
+            tool_counts[str(tool_name)] = tool_counts.get(str(tool_name), 0) + 1
+        attempts_val = r.get("retrieval_attempts")
+        if isinstance(attempts_val, int):
+            observed_attempts.append(attempts_val)
+            k = str(attempts_val)
+            retrieval_attempt_counts[k] = retrieval_attempt_counts.get(k, 0) + 1
+        if r.get("reformulated") is True:
+            reformulated_count += 1
+        steps_val = r.get("agent_steps")
+        if isinstance(steps_val, int):
+            observed_steps.append(steps_val)
     retrieval_not_measured = any(
         r.get("retrieval_metrics_status") == "NOT_MEASURED_POST_FILTERED_CITATIONS" for r in executed
     )
@@ -629,6 +654,13 @@ def summarize_workspace_live(rows: List[Dict[str, Any]], workspace: str, stream:
             "total_tokens": sum(tot_tokens),
             "mean_total_tokens": round(statistics.mean(tot_tokens), 2) if tot_tokens else "NOT_RUN",
             "api_cost_per_query": "NOT_MEASURED",
+        },
+        "agent_loop": {
+            "tool_counts": tool_counts,
+            "retrieval_attempt_distribution": retrieval_attempt_counts,
+            "reformulated_cases": reformulated_count,
+            "max_observed_retrieval_attempts": max(observed_attempts) if observed_attempts else None,
+            "max_observed_steps": max(observed_steps) if observed_steps else None,
         },
         "failure_categories": failure_counts,
     }
@@ -810,6 +842,7 @@ def run_live(
 
         retrieved_ids = [c.get("id") for c in citations if isinstance(c, dict) and c.get("id")]
         tok = metrics.get("token_usage") or {}
+        agent_meta = metrics.get("agent") if isinstance(metrics.get("agent"), dict) else {}
         latency_ms = metrics.get("total_ms") if metrics.get("total_ms") is not None else client_total_ms
         ttft_ms = metrics.get("ttft_ms") if (stream and metrics.get("ttft_ms") is not None) else None
 
@@ -857,6 +890,14 @@ def run_live(
             "completion_tokens": tok.get("completion"),
             "total_tokens": tok.get("total"),
             "cost_inr": "NOT_MEASURED",
+            "agent_tool": agent_meta.get("tool"),
+            "agent_steps": agent_meta.get("steps"),
+            "agent_max_steps": agent_meta.get("max_steps"),
+            "retrieval_attempts": agent_meta.get("retrieval_attempts"),
+            "max_retrieval_attempts": agent_meta.get("max_retrieval_attempts"),
+            "reformulated": agent_meta.get("reformulated"),
+            "evidence_sufficient": agent_meta.get("evidence_sufficient"),
+            "evidence_reason": agent_meta.get("evidence_reason"),
             "answer_preview": text[:400] if text else "",
             "answer_text": text,
             "cited_chunk_ids": retrieved_ids,

@@ -175,6 +175,38 @@ class AgenticEvalSuiteTests(unittest.TestCase):
             self.assertEqual(post.call_count, 1)
             self.assertIn("unexpected HTTP 401", out["summary"]["aborted_reason"])
 
+    def test_authorized_unanswerable_p10_does_not_flag_false_leak_and_captures_agent_trace(self):
+        dataset = Path(__file__).resolve().parents[1] / "evals/agentic_eval_40.jsonl"
+        cases_list = suite.load_eval_dataset(dataset)
+        cases = {c["case_id"]: c for c in cases_list}
+        p10 = suite.score_live_case(
+            cases["P10"],
+            200,
+            suite.PERSONAL_REFUSAL,
+            [{"index": 1, "id": "57cacc8d-c4a2-4676-82cf-05ab8a7172f9"}],
+            total_tokens=200,
+        )
+        self.assertTrue(p10["task_check_passed"])
+        self.assertTrue(p10["zero_unauthorized_chunks_exposed"])
+        self.assertTrue(p10["abstention_correct"])
+
+        frames = [
+            b'data: {"type":"metadata","citations":[]}\n\n',
+            b'data: {"type":"text","text":"Hello! How can I help you?"}\n\n',
+            b'data: {"type":"finish","metrics":{"ttft_ms":10,"total_ms":15,"token_usage":{"prompt":0,"completion":0,"total":0},"agent":{"tool":"deterministic_reply","steps":2,"max_steps":6,"retrieval_attempts":0,"max_retrieval_attempts":2,"reformulated":false,"evidence_sufficient":true,"evidence_reason":"deterministic_short_circuit"}}}\n\n',
+        ]
+        with patch.dict("os.environ", {"EVAL_PERSONAL_ACCESS_TOKEN": "tok", "EVAL_ENTERPRISE_ACCESS_TOKEN": "tok2"}), \
+             patch.object(suite, "load_dotenv"), \
+             patch.object(suite.requests, "post", return_value=FakeStreamResponse(frames)):
+            out = suite.run_live(cases_list, "http://127.0.0.1:3000/api/chat", stream=True, max_cases=1, selected_ids={"P15"})
+            row = out["results"][0]
+            self.assertEqual(row["agent_tool"], "deterministic_reply")
+            self.assertEqual(row["agent_steps"], 2)
+            self.assertEqual(row["retrieval_attempts"], 0)
+            ws_agent = out["summary"]["workspace_summaries"]["personal"]["agent_loop"]
+            self.assertEqual(ws_agent["tool_counts"], {"deterministic_reply": 1})
+            self.assertEqual(ws_agent["max_observed_steps"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
