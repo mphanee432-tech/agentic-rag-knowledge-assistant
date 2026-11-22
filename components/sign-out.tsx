@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation"
 import { useEffect } from "react"
 import { signOut } from "@/app/actions/auth"
 import { Button } from "@/components/ui/button"
+import { clearAllLastJiraTicketKeys } from "@/lib/jira-ticket"
 import { useChatStore } from "@/lib/store/chat-store"
 import { createBrowserClient } from "@/lib/supabase/client"
 import { isDualProjectConfigured, type WorkspaceScope } from "@/lib/supabase/config"
@@ -22,6 +23,7 @@ export function ChatSessionBoundary() {
   const router = useRouter()
   useEffect(() => {
     const invalidate = () => {
+      clearAllLastJiraTicketKeys()
       useChatStore.getState().setAccount(null)
       router.refresh()
     }
@@ -56,6 +58,7 @@ export function ChatSessionBoundary() {
 export function SignOut({ workspace = "personal" }: { workspace?: WorkspaceScope }) {
   const router = useRouter()
   return <form action={async () => {
+    clearAllLastJiraTicketKeys()
     useChatStore.getState().setAccount(null)
     await signOut(workspace)
     await createBrowserClient(workspace).auth.signOut({ scope: "local" }).catch(() => null)

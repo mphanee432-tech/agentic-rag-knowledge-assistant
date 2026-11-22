@@ -2,7 +2,12 @@
 import { ENTERPRISE_NO_EVIDENCE, readChatStream } from "@/lib/chat-contract"
 import { useChatStore, type Citation } from "@/lib/store/chat-store"
 
-export async function sendChat(query: string, projectId: string | null | undefined, organizationId?: string) {
+export async function sendChat(
+  query: string,
+  projectId: string | null | undefined,
+  organizationId?: string,
+  lastJiraTicketKey?: string | null,
+) {
   const store = useChatStore.getState()
   const chatScope = organizationId ? `organization:${organizationId}` : projectId
   if (!chatScope || !query.trim() || store.isLoading || store.activeProjectId !== chatScope) return
@@ -31,7 +36,13 @@ export async function sendChat(query: string, projectId: string | null | undefin
   try {
     const response = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...(organizationId ? { organizationId } : { projectId }), query, messages: history, stream: true }),
+      body: JSON.stringify({
+        ...(organizationId ? { organizationId } : { projectId }),
+        query,
+        messages: history,
+        ...(organizationId && lastJiraTicketKey ? { lastJiraTicketKey } : {}),
+        stream: true,
+      }),
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))

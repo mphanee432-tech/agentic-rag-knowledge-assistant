@@ -101,6 +101,23 @@ test("public routes enforce identity and ownership before privileged operations"
     assert.equal(calls.length, 4)
   })
 
+  await t.test("publication failure keeps indexed content retryable without reclaiming or resetting ingestion", async st => {
+    const calls: string[] = []
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      calls.push(url.pathname)
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-a", role: "authenticated" })
+      if (url.pathname.endsWith("/can_upload_enterprise_policy")) return Response.json(true)
+      if (url.pathname.endsWith("/documents")) return Response.json([{ id: docId, status: "indexed", is_published: false }])
+      assert.match(url.pathname, /publish_enterprise_document$/)
+      return Response.json({ code: "55000", message: "Publication could not complete" }, { status: 400 })
+    })
+    const response = await ingestPolicy(request("/api/enterprise/ingest", "uploader", "POST", { documentId: docId, projectId: projects.b }))
+    assert.equal(response.status, 500)
+    assert.deepEqual(await response.json(), { error: "Document indexed but publication failed. Please retry." })
+    assert.equal(calls.length, 4)
+  })
+
   await t.test("invalid sessions cannot list, create, delete, reserve, submit feedback or chat", async st => {
     let privateCalls = 0
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {

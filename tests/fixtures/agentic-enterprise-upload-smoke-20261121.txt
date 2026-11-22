@@ -1,0 +1,8 @@
+# Agentic Enterprise Upload Smoke Test
+
+This synthetic document verifies automatic Enterprise ingestion and authorized publication.
+Verification marker: AGENTIC_ENTERPRISE_UPLOAD_SMOKE_20261121.
+The test confirms that a signed Storage upload is extracted, embedded, and indexed automatically.
+Indexing alone must not publish the document. An authorized uploader must select Publish Document.
+
+This is test content, not a company policy. It contains no employee or production information.

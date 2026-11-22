@@ -74,7 +74,10 @@ export function parseChatInput(value: unknown) {
   const userQuery = query.trim()
   if (last?.role !== "user" || last.content !== userQuery) messages.push({ role: "user", content: userQuery })
   const variant = body.promptVariant || vars.promptVariant
+  const rawLastJiraKey = typeof body.lastJiraTicketKey === "string" ? body.lastJiraTicketKey.trim().toUpperCase() : ""
+  const lastJiraTicketKey = /^[A-Z][A-Z0-9_]*-[1-9]\d*$/.test(rawLastJiraKey) ? rawLastJiraKey : null
   return { ...scope, userQuery, boundedHistory: messages.slice(-10),
+    lastJiraTicketKey,
     promptVariant: typeof variant === "string" ? variant : "strict",
     isEvalMode: body.stream === false || body.stream === "false",
     wantsStream: body.stream === true || body.stream === "true" }

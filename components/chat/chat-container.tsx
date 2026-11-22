@@ -4,9 +4,13 @@ import * as React from "react"
 import { sendChat } from "@/lib/send-chat"
 import { useRef, useEffect } from "react"
 import { ENTERPRISE_NO_EVIDENCE } from "@/lib/chat-contract"
+import { selectAgentTool } from "@/lib/agent-loop"
 import {
-  draftJiraTicket,
-  extractJiraStatusIssueKey,
+  extractLatestJiraTicketKeyFromMessages,
+  formatJiraStatusMessage,
+  JIRA_STATUS_CLARIFICATION_PROMPT,
+  readLastJiraTicketKey,
+  writeLastJiraTicketKey,
 } from "@/lib/jira-ticket"
 import { JiraTicketDraftForm, useJiraTicketDraft } from "@/components/jira/jira-ticket-draft"
 import {
@@ -83,6 +87,7 @@ export function ChatContainer({
         store.accountId === draftContextRef.current.accountId &&
         store.activeProjectId === draftContextRef.current.activeProjectId
       ) {
+        writeLastJiraTicketKey(store.accountId, organizationId, ticketKey)
         store.addMessage({ id: crypto.randomUUID(), role: "assistant", content: `Created Jira ticket **${ticketKey}**.` })
       }
     },
@@ -131,9 +136,8 @@ export function ChatContainer({
         return
       }
 
-      appendAssistantMessage(
-        `**${result.ticketKey} — ${result.status}**\n\nSummary: ${result.summary}`,
-      )
+      writeLastJiraTicketKey(accountId, organizationId, result.ticketKey)
+      appendAssistantMessage(formatJiraStatusMessage(result))
     } catch {
       appendAssistantMessage(`Unable to retrieve Jira status for ${issueKey}.`)
     } finally {
@@ -145,13 +149,28 @@ export function ChatContainer({
 
   const handleSendMessage = async (query: string) => {
     if (jiraDraft) return
-    const statusIssueKey = organizationId ? extractJiraStatusIssueKey(query) : null
-    if (statusIssueKey) {
-      return lookupJiraStatus(query, statusIssueKey)
+    const currentStore = useChatStore.getState()
+    const resolvedLastTicketKey =
+      extractLatestJiraTicketKeyFromMessages(currentStore.messages) ??
+      readLastJiraTicketKey(currentStore.accountId, organizationId)
+    const decision = selectAgentTool(query, {
+      isEnterprise: enterprise,
+      jiraAccessAvailable: canDraftJira,
+      lastJiraTicketKey: resolvedLastTicketKey,
+    })
+    if (decision.tool === "jira_status") {
+      return lookupJiraStatus(query, decision.issueKey)
     }
-    const draft = canDraftJira ? draftJiraTicket(query) : null
-    if (!draft) return sendChat(query, projectId, organizationId)
+    if (decision.tool === "jira_status_clarification") {
+      currentStore.addMessage({ id: crypto.randomUUID(), role: "user", content: query })
+      currentStore.addMessage({ id: crypto.randomUUID(), role: "assistant", content: JIRA_STATUS_CLARIFICATION_PROMPT })
+      return
+    }
+    if (decision.tool !== "jira_create_draft") {
+      return sendChat(query, projectId, organizationId, resolvedLastTicketKey)
+    }
 
+    const { draft } = decision
     const store = useChatStore.getState()
     draftContextRef.current = { accountId: store.accountId, activeProjectId: store.activeProjectId }
     store.addMessage({ id: crypto.randomUUID(), role: "user", content: query })
@@ -185,12 +204,12 @@ export function ChatContainer({
           {enterprise && canUploadPolicy && (
             <Button
               variant="outline"
-              size="xs"
+              size="sm"
               onClick={() => setIsUploadPolicyOpen(true)}
-              className="text-xs h-7 gap-1.5 border-primary/40 text-primary hover:bg-primary/5 cursor-pointer font-medium"
+              className="text-sm h-9 gap-2 border-primary/40 text-primary hover:bg-primary/5 cursor-pointer font-medium"
             >
               <FileUp className="size-3 text-primary" />
-              <span>Upload Policy</span>
+              <span>Upload Document</span>
             </Button>
           )}
           {messages.length > 0 && (
@@ -199,6 +218,7 @@ export function ChatContainer({
               size="xs"
               onClick={() => {
                 closeJiraDraft()
+                writeLastJiraTicketKey(useChatStore.getState().accountId, organizationId, null)
                 clearChat()
               }}
               disabled={isLoading || isCreatingTicket}

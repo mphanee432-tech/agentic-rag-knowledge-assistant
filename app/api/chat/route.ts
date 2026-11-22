@@ -7,14 +7,26 @@ import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAns
 import { getSystemPrompt } from '@/lib/prompts/systemPrompt';
 
 import {
-  getDeterministicIntent,
   getDeterministicResponse,
   parseChatInput,
 } from '@/lib/chat-input';
+import {
+  MAX_AGENT_STEPS,
+  MAX_RETRIEVAL_ATTEMPTS,
+  runBoundedRetrievalLoop,
+  selectAgentTool,
+  type AgentTrace,
+} from '@/lib/agent-loop';
 import { retrieveVerifiedChunks } from '@/lib/retrieve-chunks';
 import { withTimeout } from '@/lib/with-timeout';
 import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citations';
 import { getEnterpriseFallbackQuestions } from '@/lib/enterprise-fallback';
+import { lookupEnterpriseJiraStatus } from '@/lib/jira-status';
+import {
+  extractLatestJiraTicketKeyFromMessages,
+  formatJiraStatusMessage,
+  JIRA_STATUS_CLARIFICATION_PROMPT,
+} from '@/lib/jira-ticket';
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Request failed';
 export const runtime = 'nodejs';
@@ -136,6 +148,7 @@ export async function POST(req: Request) {
     generation_ms: 0,
     total_ms: 0,
     retries: { embedding: 0, retrieval: 0, generation: 0 },
+    agent: null as AgentTrace | null,
     errors: [] as string[],
     token_usage: { prompt: 0, completion: 0, total: 0 },
     tokens: { prompt: 0, completion: 0, total: 0 },
@@ -158,7 +171,7 @@ export async function POST(req: Request) {
     let input;
     try { input = parseChatInput(JSON.parse(rawBody)); }
     catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid request.'); }
-    const { projectId, organizationId, userQuery, boundedHistory } = input;
+    const { projectId, organizationId, userQuery, boundedHistory, lastJiraTicketKey } = input;
     telemetry.request_parse_ms = performance.now() - reqStart;
     const authStart = performance.now();
     const { user, supabase, enterprise } = projectId
@@ -171,17 +184,17 @@ export async function POST(req: Request) {
     const promptVariant = req.headers.get('x-prompt-variant') || input.promptVariant;
     isEvalMode = !input.wantsStream && (input.isEvalMode || req.headers.get('x-eval-mode') === 'true');
     telemetry.request_mode = isEvalMode ? 'json' : 'stream';
-    const deterministicIntent = getDeterministicIntent(userQuery);
-    if (deterministicIntent) {
-      const jiraEnabled = deterministicIntent === 'greeting'
-        ? false
-        : await isJiraAccessAvailable(supabase, organizationId);
-      const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
-
+    const toolDecision = selectAgentTool(userQuery, {
+      isEnterprise: enterprise,
+      jiraAccessAvailable: false,
+      lastJiraTicketKey: extractLatestJiraTicketKeyFromMessages(boundedHistory) ?? lastJiraTicketKey,
+    });
+    const respondDirectToolReply = (responseText: string, agentTrace: AgentTrace) => {
       telemetry.retrieved_chunk_count = 0;
       telemetry.context_chars = 0;
+      telemetry.agent = agentTrace;
       failure.retrieved_chunks_found = false;
-      const deterministicHeaders = {
+      const directHeaders = {
         'Cache-Control': 'no-store',
         ...(!enterprise ? { 'x-interaction-id': interactionId } : {}),
         'x-rag-embedding-ms': '0',
@@ -192,23 +205,23 @@ export async function POST(req: Request) {
         telemetry.total_ms = Math.round(performance.now() - reqStart);
         logTiming('success');
         return Response.json({
-          text: deterministicResponse,
-          output: deterministicResponse,
+          text: responseText,
+          output: responseText,
           context: '',
           citations: [],
           retrieved_chunks: [],
           ...(!enterprise ? { interactionId } : {}),
           metrics: telemetry,
-        }, { headers: deterministicHeaders });
+        }, { headers: directHeaders });
       }
-      const deterministicStream = new ReadableStream<Uint8Array>({
+      const directStream = new ReadableStream<Uint8Array>({
         cancel() { cancelled = true; },
         start(controller) {
           try {
             controller.enqueue(encodeEvent({ type: 'metadata', ...(!enterprise ? { interactionId } : {}), citations: [] }));
             telemetry.ttft_ms = Math.round(performance.now() - reqStart);
             telemetry.server_ttft_ms = performance.now() - reqStart;
-            controller.enqueue(encodeEvent({ type: 'text', text: deterministicResponse }));
+            controller.enqueue(encodeEvent({ type: 'text', text: responseText }));
             telemetry.total_ms = Math.round(performance.now() - reqStart);
             telemetry.server_finish_ready_ms = performance.now() - reqStart;
             controller.enqueue(encodeEvent({
@@ -225,51 +238,122 @@ export async function POST(req: Request) {
           }
         },
       });
-      return new Response(deterministicStream, {
-        headers: { ...deterministicHeaders, 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' },
+      return new Response(directStream, {
+        headers: { ...directHeaders, 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' },
+      });
+    };
+
+    if (toolDecision.tool === 'deterministic_reply') {
+      const deterministicIntent = toolDecision.intent;
+      const jiraEnabled = deterministicIntent === 'greeting'
+        ? false
+        : await isJiraAccessAvailable(supabase, organizationId);
+      const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
+      return respondDirectToolReply(deterministicResponse, {
+        tool: 'deterministic_reply',
+        steps: 2,
+        max_steps: MAX_AGENT_STEPS,
+        retrieval_attempts: 0,
+        max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+        reformulated: false,
+        evidence_sufficient: true,
+        evidence_reason: 'deterministic_short_circuit',
+      });
+    }
+
+    if (toolDecision.tool === 'jira_status') {
+      const statusResult = await lookupEnterpriseJiraStatus({
+        supabase,
+        organizationId,
+        issueKey: toolDecision.issueKey,
+      });
+      return respondDirectToolReply(formatJiraStatusMessage(statusResult), {
+        tool: 'jira_status',
+        steps: 2,
+        max_steps: MAX_AGENT_STEPS,
+        retrieval_attempts: 0,
+        max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+        reformulated: false,
+        evidence_sufficient: true,
+        evidence_reason: 'tool_executed',
+      });
+    }
+
+    if (toolDecision.tool === 'jira_status_clarification') {
+      return respondDirectToolReply(JIRA_STATUS_CLARIFICATION_PROMPT, {
+        tool: 'jira_status_clarification',
+        steps: 2,
+        max_steps: MAX_AGENT_STEPS,
+        retrieval_attempts: 0,
+        max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+        reformulated: false,
+        evidence_sufficient: true,
+        evidence_reason: 'deterministic_short_circuit',
       });
     }
     const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY });
-    // Stage 1: Query Embedding via gemini-embedding-2 (1536d MRL)
-    const tEmbedStart = performance.now();
-    let queryEmbedding: number[] | undefined;
     const maxEmbedRetries = 1;
+    let totalEmbedMs = 0;
+    let totalRetrievalMs = 0;
 
-    for (let attempt = 0; attempt <= maxEmbedRetries; attempt++) {
-      try {
-        const embedRes = await withTimeout(
-          ai.models.embedContent({
-            model: 'gemini-embedding-2',
-            contents: userQuery,
-            config: { outputDimensionality: 1536, abortSignal: AbortSignal.any([req.signal, AbortSignal.timeout(15000)]) },
-          }),
-          15000,
-          'Gemini Embedding API'
-        );
-        queryEmbedding = embedRes.embeddings?.[0]?.values;
-
-        if (queryEmbedding && queryEmbedding.length === 1536 && queryEmbedding.every(Number.isFinite)) {
-          break;
-        }
-      } catch (err: unknown) {
-        if (attempt < maxEmbedRetries) {
-          telemetry.retries.embedding++;
-        } else {
-          telemetry.errors.push(`Embedding: ${errorMessage(err)}`);
-          throw err;
+    const embedQuery = async (textToEmbed: string): Promise<number[]> => {
+      const tEmbedStart = performance.now();
+      let queryEmbedding: number[] | undefined;
+      for (let attempt = 0; attempt <= maxEmbedRetries; attempt++) {
+        try {
+          const embedRes = await withTimeout(
+            ai.models.embedContent({
+              model: 'gemini-embedding-2',
+              contents: textToEmbed,
+              config: { outputDimensionality: 1536, abortSignal: AbortSignal.any([req.signal, AbortSignal.timeout(15000)]) },
+            }),
+            15000,
+            'Gemini Embedding API'
+          );
+          queryEmbedding = embedRes.embeddings?.[0]?.values;
+          if (queryEmbedding && queryEmbedding.length === 1536 && queryEmbedding.every(Number.isFinite)) {
+            break;
+          }
+        } catch (err: unknown) {
+          if (attempt < maxEmbedRetries) {
+            telemetry.retries.embedding++;
+          } else {
+            telemetry.errors.push(`Embedding: ${errorMessage(err)}`);
+            throw err;
+          }
         }
       }
-    }
-    telemetry.embedding_ms = Math.round(performance.now() - tEmbedStart);
+      totalEmbedMs += performance.now() - tEmbedStart;
+      if (!queryEmbedding || queryEmbedding.length !== 1536 || !queryEmbedding.every(Number.isFinite)) {
+        throw new Error('Failed to generate query embedding vector');
+      }
+      return queryEmbedding;
+    };
 
-    if (!queryEmbedding || queryEmbedding.length !== 1536 || !queryEmbedding.every(Number.isFinite)) {
-      throw new Error('Failed to generate query embedding vector');
-    }
-
-    // The authenticated search RPC applies document RLS before both rankings.
-    const tRetrievalStart = performance.now();
-    const relevantChunks = await retrieveVerifiedChunks(supabase, projectId, queryEmbedding, userQuery, req.signal, telemetry, enterprise, organizationId);
-    telemetry.retrieval_ms = Math.round(performance.now() - tRetrievalStart);
+    // Bounded single-agent loop (<= 2 retrieval attempts, <= 6 agent steps); RLS always applies.
+    const { chunks: relevantChunks, agent: agentTrace } = await runBoundedRetrievalLoop({
+      userQuery,
+      retrieveForQuery: async (queryText) => {
+        const queryEmbedding = await embedQuery(queryText);
+        const tRetrievalStart = performance.now();
+        const found = await retrieveVerifiedChunks(
+          supabase,
+          projectId,
+          queryEmbedding,
+          queryText,
+          req.signal,
+          telemetry,
+          enterprise,
+          organizationId,
+        );
+        totalRetrievalMs += performance.now() - tRetrievalStart;
+        return found;
+      },
+    });
+    telemetry.embedding_ms = Math.round(totalEmbedMs);
+    telemetry.retrieval_ms = Math.round(totalRetrievalMs);
+    agentTrace.steps = Math.min(agentTrace.steps + 1, MAX_AGENT_STEPS); // Final answer/refusal step
+    telemetry.agent = agentTrace;
 
     const promptStart = performance.now();
     const contextBlock =

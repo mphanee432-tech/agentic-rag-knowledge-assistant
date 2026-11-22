@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { createClient } from "@/lib/supabase/client"
+import { waitForEnterpriseIndexing } from "@/lib/enterprise-upload"
 
 interface Department {
   id: string
@@ -36,7 +37,7 @@ interface EnterprisePolicyDialogProps {
   onUploadSuccess?: () => void
 }
 
-type UploadStep = "idle" | "uploading" | "indexing" | "success" | "failed"
+type UploadStep = "idle" | "uploading" | "indexing" | "indexed" | "publishing" | "success" | "failed"
 
 export function EnterprisePolicyDialog({
   organizationId,
@@ -53,10 +54,13 @@ export function EnterprisePolicyDialog({
   const [classification, setClassification] = useState<"standard" | "restricted">("standard")
   const [accessScope, setAccessScope] = useState<"department" | "company">("department")
   const [step, setStep] = useState<UploadStep>("idle")
+  const [indexed, setIndexed] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string>("")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const operationRef = useRef<AbortController | null>(null)
+  useEffect(() => () => operationRef.current?.abort(), [])
 
   // Fetch departments for current enterprise organization on mount/open
   useEffect(() => {
@@ -110,6 +114,7 @@ export function EnterprisePolicyDialog({
     setClassification("standard")
     setAccessScope("department")
     setStep("idle")
+    setIndexed(false)
     setStatusMessage("")
     setErrorMessage(null)
     setDepartmentError(null)
@@ -117,7 +122,7 @@ export function EnterprisePolicyDialog({
 
   const handleOpenChange = (open: boolean) => {
     if (isBusy) return
-    if (!open) {
+    if (!open && (!reservation || step === "success")) {
       resetForm()
     }
     onOpenChange(open)
@@ -155,13 +160,14 @@ export function EnterprisePolicyDialog({
     setErrorMessage(null)
     setFile(selectedFile)
     setReservation(null)
+    setIndexed(false)
   }
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setIsDragging(false)
-    if (step === "uploading" || step === "indexing") return
+    if (isBusy || reservation) return
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFileSelect(e.dataTransfer.files[0])
     }
@@ -181,6 +187,8 @@ export function EnterprisePolicyDialog({
     }
 
     setErrorMessage(null)
+    const operation = new AbortController()
+    operationRef.current = operation
     try {
       let uploaded = reservation
       if (!uploaded) {
@@ -215,33 +223,27 @@ export function EnterprisePolicyDialog({
         setReservation(uploaded)
       }
 
-      // 3. Trigger ingestion & publication
+      if (indexed) {
+        setStep("publishing")
+        setStatusMessage("Publishing the indexed document after checking your upload authorization...")
+        const response = await fetch("/api/enterprise/ingest", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(uploaded), signal: operation.signal,
+        })
+        const result = await response.json()
+        if (!response.ok) throw new Error(result.error || "Document publication failed. Retry publication without re-uploading.")
+        setStep("success")
+        setStatusMessage("Published — the indexed document is available according to its access rules.")
+        onUploadSuccess?.()
+        return
+      }
+
       setStep("indexing")
-      setStatusMessage("2/3 Extracting content, generating 1536d embeddings, and indexing chunks...")
-
-      const ingestRes = await fetch("/api/enterprise/ingest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(uploaded),
-      })
-
-      const ingestData = await ingestRes.json()
-      if (!ingestRes.ok) {
-        if (ingestRes.status === 422) setReservation(null)
-        throw new Error(ingestData.error || "Document indexing and publication failed.")
-      }
-
-      setStep("success")
-      setStatusMessage("3/3 Policy indexed and published successfully!")
-
-      if (onUploadSuccess) {
-        onUploadSuccess()
-      }
-
-      setTimeout(() => {
-        resetForm()
-        onOpenChange(false)
-      }, 2000)
+      setStatusMessage("Processing — extracting content and generating embeddings...")
+      await waitForEnterpriseIndexing(uploaded, setStatusMessage, operation.signal)
+      setIndexed(true)
+      setStep("indexed")
+      setStatusMessage("Indexed — unpublished. Select Publish Document to make it available under its access rules.")
     } catch (err) {
       console.error("Enterprise upload error:", err)
       setStep("failed")
@@ -249,7 +251,7 @@ export function EnterprisePolicyDialog({
     }
   }
 
-  const isBusy = step === "uploading" || step === "indexing"
+  const isBusy = step === "uploading" || step === "indexing" || step === "publishing"
 
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
@@ -260,11 +262,11 @@ export function EnterprisePolicyDialog({
               <UploadCloud className="size-4" />
             </div>
             <DialogTitle className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              Upload Enterprise Policy
+              Upload Enterprise Document
             </DialogTitle>
           </div>
           <DialogDescription className="text-xs text-muted-foreground">
-            Ingest and index an authoritative policy or SOP document into the Employee Knowledge Copilot.
+            Upload PDF, TXT, or HTML, wait for indexing, then explicitly publish the document.
           </DialogDescription>
         </DialogHeader>
 
@@ -280,7 +282,7 @@ export function EnterprisePolicyDialog({
               setIsDragging(false)
             }}
             onDrop={handleDrop}
-            onClick={() => !isBusy && fileInputRef.current?.click()}
+            onClick={() => !isBusy && !reservation && fileInputRef.current?.click()}
             className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-colors ${
               isDragging
                 ? "border-primary bg-primary/5"
@@ -293,8 +295,9 @@ export function EnterprisePolicyDialog({
               ref={fileInputRef}
               type="file"
               accept=".pdf,.txt,.html"
+              aria-label="Select an Enterprise document"
               className="hidden"
-              disabled={isBusy}
+              disabled={isBusy || Boolean(reservation)}
               onChange={(e) => {
                 if (e.target.files && e.target.files.length > 0) {
                   handleFileSelect(e.target.files[0])
@@ -313,7 +316,7 @@ export function EnterprisePolicyDialog({
                     {(file.size / 1024 / 1024).toFixed(2)} MB • {file.name.split(".").pop()?.toUpperCase()}
                   </p>
                 </div>
-                {!isBusy && (
+                {!isBusy && !reservation && (
                   <button
                     type="button"
                     aria-label="Remove selected file"
@@ -435,14 +438,14 @@ export function EnterprisePolicyDialog({
 
           {/* Progress / Status display */}
           {isBusy && (
-            <div className="p-3 rounded-lg bg-primary/5 border border-primary/20 flex items-center gap-2.5">
+            <div role="status" className="p-3 rounded-lg bg-primary/5 border border-primary/20 flex items-center gap-2.5">
               <Loader2 className="size-4 text-primary animate-spin shrink-0" />
               <p className="text-xs text-primary font-medium">{statusMessage}</p>
             </div>
           )}
 
-          {step === "success" && (
-            <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-2.5">
+          {(step === "success" || step === "indexed") && (
+            <div role="status" className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center gap-2.5">
               <CheckCircle2 className="size-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
               <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
                 {statusMessage}
@@ -451,7 +454,7 @@ export function EnterprisePolicyDialog({
           )}
 
           {errorMessage && (
-            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center gap-2.5">
+            <div role="alert" className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center gap-2.5">
               <AlertCircle className="size-4 text-rose-600 dark:text-rose-400 shrink-0" />
               <p className="text-xs text-rose-700 dark:text-rose-300 font-medium">{errorMessage}</p>
             </div>
@@ -459,6 +462,9 @@ export function EnterprisePolicyDialog({
 
           {/* Action buttons */}
           <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-100 dark:border-zinc-800">
+            {step === "failed" && !indexed && (
+              <Button type="button" variant="ghost" size="sm" onClick={resetForm}>Choose Another Document</Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -467,7 +473,7 @@ export function EnterprisePolicyDialog({
               onClick={() => handleOpenChange(false)}
               className="text-xs cursor-pointer"
             >
-              Cancel
+              {step === "success" ? "Done" : "Close"}
             </Button>
             <Button
               type="submit"
@@ -476,7 +482,7 @@ export function EnterprisePolicyDialog({
               className="text-xs gap-1.5 cursor-pointer bg-primary text-primary-foreground hover:bg-primary/90"
             >
               {isBusy && <Loader2 className="size-3.5 animate-spin" />}
-              <span>{isBusy ? "Processing Policy..." : reservation ? "Retry Indexing" : "Upload & Index Policy"}</span>
+              <span>{isBusy ? "Processing Document..." : indexed ? (step === "failed" ? "Retry Publication" : "Publish Document") : reservation ? "Check Indexing Status" : "Upload & Index Document"}</span>
             </Button>
           </div>
         </form>

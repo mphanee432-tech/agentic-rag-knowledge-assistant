@@ -8,6 +8,9 @@ import {
   DEFAULT_JIRA_PROJECT_ID,
   draftJiraTicket,
   extractJiraStatusIssueKey,
+  extractLatestJiraTicketKeyFromMessages,
+  formatJiraStatusMessage,
+  isKeylessJiraStatusQuery,
 } from "../lib/jira-ticket"
 
 const DEFAULT_ISSUE_TYPE_ID = "10011"
@@ -441,10 +444,34 @@ test("buildAccountSummary derives exact Employee, Manager, CXO, Inactive, and mi
 
 test("extracts and normalizes explicit Jira status requests without affecting creation or RAG queries", () => {
   assert.equal(extractJiraStatusIssueKey("What is the status of ECD-6?"), "ECD-6")
+  assert.equal(extractJiraStatusIssueKey("What is the current status of ECD-6?"), "ECD-6")
+  assert.equal(extractJiraStatusIssueKey("Can you tell me the current status of my Jira ticket ECD-6 right now?"), "ECD-6")
+  assert.equal(extractJiraStatusIssueKey("Check status of this Jira ticket ECD-6 please"), "ECD-6")
+  assert.equal(extractJiraStatusIssueKey("What is ECD-6's current status?"), "ECD-6")
   assert.equal(extractJiraStatusIssueKey("Check ECD-6 status"), "ECD-6")
   assert.equal(extractJiraStatusIssueKey("Track ticket ecd-6"), "ECD-6")
   assert.equal(extractJiraStatusIssueKey("Could you check the status of Jira ticket ecd-12?"), "ECD-12")
   assert.equal(extractJiraStatusIssueKey("Check ABC-42 status"), "ABC-42")
+
+  assert.equal(isKeylessJiraStatusQuery("What is the status of the ticket I just created?"), true)
+  assert.equal(isKeylessJiraStatusQuery("Check its current status please"), true)
+  assert.equal(isKeylessJiraStatusQuery("What is the status of my ticket?"), true)
+  assert.equal(isKeylessJiraStatusQuery("How do I track a Jira ticket?"), false)
+  assert.equal(isKeylessJiraStatusQuery("What is the Jira workflow policy?"), false)
+
+  assert.equal(
+    extractLatestJiraTicketKeyFromMessages([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "Created Jira ticket **ECD-7**." },
+    ]),
+    "ECD-7",
+  )
+  assert.equal(
+    extractLatestJiraTicketKeyFromMessages([
+      { role: "assistant", content: formatJiraStatusMessage({ ticketKey: "ECD-6", status: "In Progress", summary: "VPN" }) },
+    ]),
+    "ECD-6",
+  )
 
   assert.equal(draftJiraTicket("What is the status of ECD-6?"), null)
   assert.equal(draftJiraTicket("Track ticket ECD-6"), null)

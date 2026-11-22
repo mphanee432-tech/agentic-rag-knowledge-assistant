@@ -19,8 +19,17 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
       else process.env[key] = value
     }
   })
-  t.mock.method(console, "error", () => {})
+  const loggedErrors: unknown[][] = []
+  t.mock.method(console, "error", (...args: unknown[]) => { loggedErrors.push(args) })
+  t.mock.method(console, "warn", () => {})
+  t.mock.method(Math, "random", () => 0)
+  const realTimer = globalThis.setTimeout
+  t.mock.method(globalThis, "setTimeout", ((cb: () => void, ms?: number) =>
+    realTimer(cb, ms === 1000 || ms === 2000 || ms === 5000 ? 0 : ms)) as typeof setTimeout)
   const content = "# Test document\n\nThis is evidence for an ingestion test."
+  const pdf = await PDFDocument.create()
+  pdf.addPage()
+  const pdfBytes = Buffer.from(await pdf.save())
   const cases = [
     { name: "successful ingestion", status: 200 },
     { name: "large text paragraph", largeProse: true, status: 200 },
@@ -33,11 +42,27 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
     { name: "size mismatch", sizeMismatch: true, status: 422, retryable: false },
     { name: "empty text", empty: true, status: 422, retryable: false },
     { name: "invalid PDF", pdf: true, status: 422, retryable: false },
+    { name: "PDF extraction recovers from 503", validPdf: true, extractionStatuses: [503, 200], status: 200 },
+    { name: "PDF extraction stops on 401", validPdf: true, extractionStatuses: [401], status: 500, retryable: false },
+    { name: "embedding recovers from 429 Retry-After", embeddingStatuses: [429, 200], status: 200 },
+    { name: "embedding stops on 400", embeddingStatuses: [400], status: 500, retryable: false },
+    { name: "embedding exhausts 503 retries", embeddingStatuses: [503, 503, 503], status: 500, retryable: true },
+    { name: "partial embedding batch never persists", largeProse: true, failLaterEmbedding: true, status: 500, retryable: true },
+    { name: "worker deadline prevents embedding and finalization", deadlineExpired: true, status: 500, retryable: true },
   ]
   for (const scenario of cases) {
     await t.test(scenario.name, async st => {
+      if (scenario.deadlineExpired) {
+        const realTimeout = AbortSignal.timeout
+        st.mock.method(AbortSignal, "timeout", (ms: number) => ms === 270000
+          ? AbortSignal.abort(new DOMException("Worker deadline", "TimeoutError")) : realTimeout(ms))
+      }
       const text = scenario.empty ? "   " : scenario.largeProse ? "word ".repeat(6000) : content
-      const storagePath = "user-a/project-a/document-a/source." + (scenario.pdf ? "pdf" : "txt")
+      const payload = scenario.validPdf ? pdfBytes : text
+      const storagePath = "user-a/project-a/document-a/source." + (scenario.pdf || scenario.validPdf ? "pdf" : "txt")
+      let extractionCalls = 0
+      let embeddingCalls = 0
+      let documentStatus = scenario.documentStatus || "uploaded"
       const calls: string[] = []
       const failures: Array<Record<string, unknown>> = []
       const completions: Array<Record<string, unknown>> = []
@@ -49,8 +74,8 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
           if (url.pathname === "/rest/v1/documents") {
             assert.equal(init?.method, "GET")
             return Response.json([{ id: "document-a", project_id: "project-a", storage_path: storagePath,
-              status: scenario.documentStatus || "uploaded",
-              expected_size: Buffer.byteLength(text) + (scenario.sizeMismatch ? 1 : 0) }])
+              status: documentStatus,
+              expected_size: Buffer.byteLength(payload) + (scenario.sizeMismatch ? 1 : 0) }])
           }
           if (url.pathname === "/rest/v1/rpc/claim_document_ingestion") {
             const body = JSON.parse(String(init?.body))
@@ -60,7 +85,7 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
             return Response.json(scenario.acquired !== false)
           }
           if (url.pathname.startsWith("/storage/v1/object/")) {
-            return scenario.downloadError ? Response.json({ message: "Unavailable" }, { status: 503 }) : new Response(text)
+            return scenario.downloadError ? Response.json({ message: "Unavailable" }, { status: 503 }) : new Response(payload)
           }
           if (url.pathname === "/rest/v1/rpc/finish_document_ingestion") {
             const body = JSON.parse(String(init?.body))
@@ -70,7 +95,8 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
             assert.equal(body.p_chunks[0].embedding.length, 1536)
         if (scenario.largeProse) assert.ok(body.p_chunks.every((chunk: { content: string }) => chunk.content.length <= 3200))
             completions.push(body)
-            return scenario.finishError ? Response.json({ message: "Lease lost" }, { status: 400 }) : Response.json(null)
+            if (!scenario.finishError) documentStatus = "indexed"
+            return scenario.finishError ? Response.json({ message: content }, { status: 400 }) : Response.json(null)
           }
           if (url.pathname === "/rest/v1/rpc/fail_document_ingestion") {
             failures.push(JSON.parse(String(init?.body)))
@@ -80,9 +106,18 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
         }
         if (url.hostname === "generativelanguage.googleapis.com") {
           if (url.pathname.endsWith(":batchEmbedContents")) {
+            const status = scenario.embeddingStatuses?.[embeddingCalls] ?? (scenario.failLaterEmbedding && embeddingCalls > 0 ? 503 : 200)
+            embeddingCalls++
+            if (status !== 200) return Response.json({ error: { code: status, message: "Gemini busy" } }, { status, headers: { "Retry-After": "5" } })
             return Response.json({ embeddings: [{ values: scenario.invalidEmbedding ? [] : Array(1536).fill(0.1) }] })
           }
           if (url.pathname.endsWith(":generateContent")) {
+            const request = JSON.parse(String(init?.body))
+            if (request.contents?.[0]?.parts?.some((part: { inlineData?: unknown }) => part.inlineData)) {
+              const status = scenario.extractionStatuses?.[extractionCalls++] ?? 200
+              if (status !== 200) return Response.json({ error: { code: status, message: "Gemini busy" } }, { status })
+              return Response.json({ candidates: [{ content: { role: "model", parts: [{ text: content }] }, finishReason: "STOP" }] })
+            }
             return Response.json({ candidates: [{ content: { role: "model", parts: [{ text: "[]" }] }, finishReason: "STOP" }] })
           }
         }
@@ -104,7 +139,24 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
       } else assert.deepEqual(failures, [])
       if (scenario.noClaim) assert.equal(calls.length, 1)
       if (scenario.acquired === false) assert.equal(calls.length, 2)
-      assert.equal(completions.length, scenario.name === "successful ingestion" || scenario.largeProse || scenario.finishError ? 1 : 0)
+      assert.equal(completions.length, !scenario.noClaim && (scenario.status === 200 || scenario.finishError) ? 1 : 0)
+      assert.ok(!calls.some(path => path.startsWith("/rest/v1/document_chunks")), "Chunks must only be written by the atomic finish RPC")
+      if (scenario.extractionStatuses) assert.equal(extractionCalls, scenario.extractionStatuses.length)
+      if (scenario.embeddingStatuses) assert.equal(embeddingCalls, scenario.embeddingStatuses.length)
+      if (scenario.deadlineExpired) {
+        assert.equal(embeddingCalls, 0)
+        assert.equal(failures[0].p_error, "Ingestion timed out.")
+      }
+      if (scenario.status === 200 && !scenario.noClaim) {
+        const replay = await POST(new Request("https://app.invalid/api/webhooks/storage", {
+          method: "POST", headers: { "x-webhook-secret": env.SUPABASE_WEBHOOK_SECRET },
+          body: JSON.stringify({ storagePath }),
+        }))
+        assert.equal(replay.status, 200)
+        assert.equal((await replay.json()).alreadyIndexed, true)
+        assert.equal(completions.length, 1, "Replay must not insert chunks again")
+        assert.equal(calls.filter(path => path.endsWith("/claim_document_ingestion")).length, 1)
+      }
     })
   }
   await t.test("both secret headers authenticate ignored events without dispatching", async st => {
@@ -149,6 +201,7 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
   })
 
   await t.test("enterprise ingestion retries 503 and 429 with 1s/2s backoff, fails fast on 400/401/403, and reuses reservations on retry", async st => {
+    st.mock.method(Math, "random", () => 0)
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "test-anon"
     st.after(() => { delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY })
     const warnings: Array<Record<string, unknown>> = []
@@ -396,4 +449,6 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
     assert.equal(pdfResult.finishCalls, 1)
     assert.equal(pdfResult.publishCalls, 1)
   })
+  assert.ok(!JSON.stringify(loggedErrors).includes(env.GOOGLE_GENERATIVE_AI_API_KEY))
+  assert.ok(!JSON.stringify(loggedErrors).includes(content))
 })

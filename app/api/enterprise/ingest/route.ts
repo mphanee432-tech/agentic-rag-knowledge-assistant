@@ -3,6 +3,7 @@ import { PDFDocument } from "pdf-lib"
 import { apiError, HttpError, requireUser } from "@/lib/auth"
 import { createAdminClient } from "@/lib/supabase/admin"
 import { splitMarkdown } from "@/lib/chunking/splitter"
+import { geminiIngestionFetch, getGeminiErrorStatus, isAbortOrTimeoutError, isTransientGeminiError, withGeminiRetry } from "@/lib/gemini-ingestion-retry"
 
 export const runtime = "nodejs"
 export const maxDuration = 300
@@ -14,141 +15,28 @@ const GEMINI_TIMEOUT_MESSAGE = "Gemini timed out while indexing. Please retry in
 const EXTRACTION_ATTEMPT_TIMEOUT_MS = 60_000
 const EMBEDDING_ATTEMPT_TIMEOUT_MS = 30_000
 
-async function sleep(ms: number, signal?: AbortSignal) {
-  if (signal?.aborted) {
-    throw signal.reason ?? new DOMException("This operation was aborted", "AbortError")
-  }
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer)
-      reject(signal?.reason ?? new DOMException("This operation was aborted", "AbortError"))
+export async function GET(req: Request) {
+  try {
+    const params = new URL(req.url).searchParams
+    const documentId = params.get("documentId")
+    const projectId = params.get("projectId")
+    const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
+    if (!documentId || !projectId || !uuid.test(documentId) || !uuid.test(projectId)) {
+      throw new HttpError(400, "Valid document and project IDs are required.")
     }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort)
-      resolve()
-    }, ms)
-    signal?.addEventListener("abort", onAbort, { once: true })
-  })
-}
-
-function getGeminiErrorStatus(err: unknown): number | undefined {
-  if (!err || typeof err !== "object") return undefined
-  const record = err as {
-    status?: unknown
-    code?: unknown
-    error?: { status?: unknown; code?: unknown }
+    const auth = await requireUser(req, "enterprise")
+    const { data: allowed, error: denied } = await auth.supabase.rpc("can_upload_enterprise_policy", { p_project_id: projectId })
+    if (denied || !allowed) throw new HttpError(403, "Enterprise upload authorization denied.")
+    // Unpublished status is visible only to an authorized uploader, without exposing document content.
+    const { data: document, error } = await createAdminClient("enterprise").from("documents")
+      .select("id,status,is_published,last_ingestion_error").eq("id", documentId).eq("project_id", projectId).maybeSingle()
+    if (error) throw new HttpError(500, "Unable to load document status.")
+    if (!document) throw new HttpError(404, "Document reservation not found.")
+    return Response.json({ document }, { headers: { "Cache-Control": "private, no-store" } })
+  } catch (error) {
+    return apiError(error instanceof HttpError || error instanceof SyntaxError
+      ? error : new HttpError(500, "Unable to load document status."))
   }
-  for (const candidate of [record.status, record.code, record.error?.code, record.error?.status]) {
-    if (typeof candidate === "number" && Number.isInteger(candidate)) return candidate
-    if (typeof candidate === "string" && /^\d{3}$/.test(candidate)) return Number(candidate)
-  }
-  return undefined
-}
-
-function isAbortOrTimeoutError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false
-  const name = (err as { name?: unknown }).name
-  const message = (err as { message?: unknown }).message
-  if (name === "AbortError" || name === "TimeoutError") return true
-  return typeof message === "string" && /\babort(ed)?\b|\btimed?\s*out\b/i.test(message)
-}
-
-function isTransientGeminiError(err: unknown): boolean {
-  const status = getGeminiErrorStatus(err)
-  if (status !== undefined) return status === 429 || status === 503
-  if (!(err instanceof Error)) return false
-  if (/\b(400|401|403|404)\b/.test(err.message)) return false
-  return /\b(429|503)\b|resource[_\s]exhausted|unavailable/i.test(err.message)
-}
-
-interface RetryOptions {
-  stage?: "pdf_extraction" | "embedding"
-  model?: string
-  inputBytes?: number
-  maxRetries?: number
-  initialDelay?: number
-  attemptTimeoutMs?: number
-  routeSignal?: AbortSignal
-  clientSignal?: AbortSignal
-}
-
-async function withRetry<T>(
-  fn: (attemptSignal: AbortSignal) => Promise<T>,
-  options: RetryOptions = {}
-): Promise<T> {
-  const {
-    stage = "pdf_extraction",
-    model = "unknown",
-    inputBytes = 0,
-    maxRetries = 3,
-    initialDelay = 1000,
-    attemptTimeoutMs = EXTRACTION_ATTEMPT_TIMEOUT_MS,
-    routeSignal,
-    clientSignal,
-  } = options
-  let delay = initialDelay
-  const parentSignals = [routeSignal, clientSignal].filter((s): s is AbortSignal => Boolean(s))
-  const lifecycleSignal = parentSignals.length > 0 ? AbortSignal.any(parentSignals) : undefined
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    if (clientSignal?.aborted) {
-      throw clientSignal.reason ?? new DOMException("This operation was aborted", "AbortError")
-    }
-    if (routeSignal?.aborted) {
-      throw routeSignal.reason ?? new DOMException("The operation was aborted due to timeout", "TimeoutError")
-    }
-
-    const attemptTimeout = AbortSignal.timeout(attemptTimeoutMs)
-    const attemptSignal = lifecycleSignal
-      ? AbortSignal.any([attemptTimeout, lifecycleSignal])
-      : attemptTimeout
-    const attemptStart = performance.now()
-
-    try {
-      return await fn(attemptSignal)
-    } catch (err: unknown) {
-      const durationMs = Math.round(performance.now() - attemptStart)
-      const status = getGeminiErrorStatus(err)
-      const attemptTimedOut = !clientSignal?.aborted && (attemptTimeout.aborted || isAbortOrTimeoutError(err))
-      const transient = isTransientGeminiError(err)
-      const failureType = clientSignal?.aborted
-        ? "client_cancelled"
-        : routeSignal?.aborted
-        ? "route_timeout"
-        : attemptTimedOut
-        ? "attempt_timeout"
-        : status !== undefined
-        ? `http_${status}`
-        : err instanceof Error
-        ? err.name
-        : "unknown_error"
-
-      console.warn(
-        JSON.stringify({
-          event: "gemini_ingest_attempt_failed",
-          stage,
-          model,
-          inputBytes,
-          attempt,
-          maxRetries,
-          durationMs,
-          failureType,
-          willRetry: !clientSignal?.aborted && !routeSignal?.aborted && (transient || attemptTimedOut) && attempt < maxRetries,
-        })
-      )
-
-      if (clientSignal?.aborted || routeSignal?.aborted) {
-        throw err
-      }
-      if ((transient || attemptTimedOut) && attempt < maxRetries) {
-        await sleep(delay, lifecycleSignal)
-        delay *= 2
-        continue
-      }
-      throw err
-    }
-  }
-  throw new Error("Exceeded max retries")
 }
 
 export async function POST(req: Request) {
@@ -156,7 +44,10 @@ export async function POST(req: Request) {
   let claimed = false
   const lease = crypto.randomUUID()
   const clientSignal = req.signal
-  const signal = AbortSignal.timeout(270000)
+  const controller = new AbortController()
+  const signal = AbortSignal.any([AbortSignal.timeout(270000), clientSignal, controller.signal])
+  const deadline = Date.now() + 250000
+  let stage = "authorization"
   const admin = createAdminClient("enterprise")
 
   try {
@@ -194,6 +85,7 @@ export async function POST(req: Request) {
     }
 
     const publish = async () => {
+      stage = "publication"
       const { error } = await auth.supabase.rpc("publish_enterprise_document", { p_document_id: doc.id })
       if (error) throw new HttpError(500, "Document indexed but publication failed. Please retry.")
     }
@@ -224,6 +116,7 @@ export async function POST(req: Request) {
     }
     claimed = true
 
+    stage = "download"
     // 4. Download file from private Storage
     const { data: blob, error: downloadError } = await admin.storage.from("documents").download(doc.storage_path)
     if (downloadError || !blob) throw new Error("Unable to download reserved upload from storage.")
@@ -239,10 +132,11 @@ export async function POST(req: Request) {
 
     const ai = new GoogleGenAI({
       apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-      httpOptions: { retryOptions: { attempts: 1 } },
+      httpOptions: { retryOptions: { attempts: 1 }, fetch: geminiIngestionFetch },
     })
     let markdown = ""
 
+    stage = "extraction"
     // 5. Text extraction
     if (/\.pdf$/i.test(filename)) {
       const pdf = await PDFDocument.load(await blob.arrayBuffer()).catch(() => {
@@ -260,7 +154,7 @@ export async function POST(req: Request) {
         const pdfBase64 = Buffer.from(sectionBytes).toString("base64")
         const extractionModel = process.env.EXTRACTION_MODEL || "gemini-3.5-flash-lite"
 
-        const response = await withRetry(
+        const response = await withGeminiRetry(
           attemptSignal =>
             ai.models.generateContent({
               model: extractionModel,
@@ -278,12 +172,12 @@ export async function POST(req: Request) {
               config: { abortSignal: attemptSignal },
             }),
           {
-            stage: "pdf_extraction",
+            stage: "extraction",
             model: extractionModel,
             inputBytes: sectionBytes.byteLength,
             attemptTimeoutMs: EXTRACTION_ATTEMPT_TIMEOUT_MS,
-            routeSignal: signal,
-            clientSignal,
+            signal,
+            deadline,
           }
         )
 
@@ -315,14 +209,15 @@ export async function POST(req: Request) {
       throw new InvalidDocumentError("A document section is too large. Split the document before uploading.")
     }
 
-    // 7. Embeddings generation with bounded retry for 429/503/timeouts
+    stage = "embedding"
+    // 7. Embeddings generation with bounded retries
     const rows: Array<{ content: string; metadata: Record<string, unknown>; embedding: number[] }> = []
     for (let i = 0; i < chunks.length; i += 4) {
       signal.throwIfAborted()
       clientSignal?.throwIfAborted()
       const batch = await Promise.all(
         chunks.slice(i, i + 4).map(async chunk => {
-          const response = await withRetry(
+          const response = await withGeminiRetry(
             attemptSignal =>
               ai.models.embedContent({
                 model: "gemini-embedding-2",
@@ -334,8 +229,8 @@ export async function POST(req: Request) {
               model: "gemini-embedding-2",
               inputBytes: Buffer.byteLength(chunk.content),
               attemptTimeoutMs: EMBEDDING_ATTEMPT_TIMEOUT_MS,
-              routeSignal: signal,
-              clientSignal,
+              signal,
+              deadline,
             }
           )
           const embedding = response.embeddings?.[0]?.values
@@ -351,6 +246,7 @@ export async function POST(req: Request) {
     signal.throwIfAborted()
     clientSignal?.throwIfAborted()
 
+    stage = "persistence"
     // 8. Finish document ingestion (writes chunks and sets status = 'indexed')
     const { error: finishError } = await admin.rpc("finish_document_ingestion", {
       p_document_id: doc.id,
@@ -358,6 +254,8 @@ export async function POST(req: Request) {
       p_chunks: rows,
     })
     if (finishError) throw finishError
+    claimed = false
+    stage = "publication"
 
     // 9. Publish document: validates indexed status and sets is_published = true
     await publish()
@@ -371,16 +269,20 @@ export async function POST(req: Request) {
       accessScope: doc.access_scope,
     })
   } catch (error) {
-    console.error("Enterprise ingestion failed:", error)
+    const routeTimedOut = signal.aborted && !clientSignal.aborted
+    controller.abort()
+    console.error("Enterprise ingestion failed:", { stage, status: getGeminiErrorStatus(error) ?? null })
     const clientCancelled = Boolean(clientSignal?.aborted)
-    const geminiBusy = !clientCancelled && isTransientGeminiError(error)
-    const geminiTimedOut = !clientCancelled && !geminiBusy && (signal.aborted || isAbortOrTimeoutError(error))
+    const geminiStage = stage === "extraction" || stage === "embedding"
+    const geminiBusy = geminiStage && !clientCancelled && !isAbortOrTimeoutError(error) && isTransientGeminiError(error)
+    const geminiTimedOut = !clientCancelled && !geminiBusy && (routeTimedOut || (geminiStage && isAbortOrTimeoutError(error)))
     if (claimed && documentId) {
       try {
-        await admin.rpc("fail_document_ingestion", {
+        const { error: markError } = await admin.rpc("fail_document_ingestion", {
           p_document_id: documentId,
           p_lease: lease,
-          p_retryable: !(error instanceof InvalidDocumentError),
+          p_retryable: !(error instanceof InvalidDocumentError) && !((stage === "extraction" || stage === "embedding")
+            && getGeminiErrorStatus(error) !== undefined && !isTransientGeminiError(error)),
           p_error:
             error instanceof InvalidDocumentError
               ? error.message
@@ -392,8 +294,9 @@ export async function POST(req: Request) {
               ? GEMINI_BUSY_MESSAGE
               : "Extraction, embedding or persistence failed.",
         })
-      } catch (err: unknown) {
-        console.error("Unable to record failure:", err)
+        if (markError) console.error("Unable to record failure:", { stage: "persistence", status: getGeminiErrorStatus(markError) ?? null })
+      } catch {
+        console.error("Unable to record failure:", { stage: "persistence" })
       }
     }
     if (clientCancelled) {
@@ -405,6 +308,7 @@ export async function POST(req: Request) {
     if (geminiTimedOut) {
       return Response.json({ error: GEMINI_TIMEOUT_MESSAGE }, { status: 504 })
     }
-    return apiError(error)
+    return apiError(error instanceof HttpError || error instanceof SyntaxError
+      ? error : new HttpError(500, "The request could not be completed."))
   }
 }
