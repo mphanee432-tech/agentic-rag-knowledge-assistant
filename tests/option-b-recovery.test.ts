@@ -52,8 +52,34 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqJson = JSON.parse(String(init?.body)) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+            systemInstruction?: unknown
+          }
+          if (reqJson.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "avoid Kafka small chunks" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqJson.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      rpcCalls === 1
+                        ? { sufficient: false, reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Kafka Kubernetes fewer than 10000 chunks", clarificationQuestion: null }
+                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           genCalls++
-          const reqJson = JSON.parse(String(init?.body))
           const sysText = JSON.stringify(reqJson.systemInstruction ?? "")
           assert.match(sysText, /below 10,000 chunks/)
           return Response.json({
@@ -133,8 +159,34 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqJson = JSON.parse(String(init?.body)) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+            systemInstruction?: unknown
+          }
+          if (reqJson.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "office bookshelf cap" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqJson.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      rpcCalls === 1
+                        ? { sufficient: false, reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Bluebird Bookshelf Book Exchange borrow limit", clarificationQuestion: null }
+                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           genCalls++
-          const reqJson = JSON.parse(String(init?.body))
           const sysText = JSON.stringify(reqJson.systemInstruction ?? "")
           assert.match(sysText, /Bluebird Bookshelf.*two books/i)
           return Response.json({
@@ -154,6 +206,8 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
         assert.equal(authHeader, "Bearer enterprise-user-token")
         return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
       }
+      if (url.pathname === "/rest/v1/demo_jira_access") return Response.json({ enabled: false })
+      if (url.pathname === "/rest/v1/rpc/enterprise_account_status") return Response.json([{ organization_id: ORG_ID, role: "employee", is_active: true }])
       if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
         rpcCalls++
         seenAuthHeaders.push(authHeader)
@@ -197,17 +251,40 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
   await t.test("Test 1C & 3: Exhausting both attempts abstains safely without 3rd retrieval; sufficient Attempt 1 skips retry", async (st) => {
     // 1) Exhaustion abstention in Personal RAG (non-answer chunks on both Attempt 1 and Attempt 2)
     let personalRpcCalls = 0
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.hostname === "generativelanguage.googleapis.com") {
         if (url.pathname.endsWith(":batchEmbedContents") || url.pathname.endsWith(":embedContent")) {
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
-          return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: NO_EVIDENCE }] }, finishReason: "STOP" }],
-            usageMetadata: { promptTokenCount: 80, candidatesTokenCount: 5, totalTokenCount: 85 },
-          })
+          const reqJson = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqJson.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "unknown quantum limit" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqJson.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      personalRpcCalls === 1
+                        ? { sufficient: false, reason: "insufficient_evidence", nextAction: "retry_retrieval", reformulatedQuery: "quantum limit threshold", clarificationQuestion: null }
+                        : { sufficient: false, reason: "insufficient_after_retries", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
+          assert.fail("Final answer generation must not run when evaluator abstains")
         }
       }
       if (url.pathname === "/auth/v1/user") return Response.json({ id: "personal-owner-1", role: "authenticated" })

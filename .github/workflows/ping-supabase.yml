@@ -2,33 +2,96 @@ name: Ping Supabase DB
 
 on:
   schedule:
-    # Runs at 00:00 UTC every 3 days (Supabase pauses after 7 days of inactivity)
+    # Runs at 00:00 UTC every 3 days (Supabase free tier pauses after 7 days without DB activity).
     - cron: '0 0 */3 * *'
   workflow_dispatch: # Allows manual trigger from the Actions UI
+
+permissions:
+  contents: read
 
 jobs:
   ping-db:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Ping Supabase Database
+      - name: Ping Personal and Enterprise Supabase Databases
+        shell: bash
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          PERSONAL_URL: ${{ vars.NEXT_PUBLIC_PERSONAL_SUPABASE_URL || secrets.PERSONAL_SUPABASE_URL || secrets.SUPABASE_URL }}
+          PERSONAL_KEY: ${{ vars.NEXT_PUBLIC_PERSONAL_SUPABASE_PUBLISHABLE_KEY || secrets.PERSONAL_SUPABASE_ANON_KEY || secrets.SUPABASE_ANON_KEY }}
+          PERSONAL_EMAIL: ${{ secrets.EVAL_PERSONAL_EMAIL }}
+          PERSONAL_PASSWORD: ${{ secrets.EVAL_PERSONAL_PASSWORD }}
+          ENTERPRISE_URL: ${{ vars.NEXT_PUBLIC_ENTERPRISE_SUPABASE_URL || secrets.ENTERPRISE_SUPABASE_URL }}
+          ENTERPRISE_KEY: ${{ vars.NEXT_PUBLIC_ENTERPRISE_SUPABASE_PUBLISHABLE_KEY || secrets.ENTERPRISE_SUPABASE_ANON_KEY }}
+          ENTERPRISE_EMAIL: ${{ secrets.EVAL_ENTERPRISE_EMAIL }}
+          ENTERPRISE_PASSWORD: ${{ secrets.EVAL_ENTERPRISE_PASSWORD }}
         run: |
-          # Replace 'profiles' with any valid table name in your public schema
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X GET "${SUPABASE_URL}/rest/v1/projects?select=id&limit=1" \
-            -H "apikey: ${SUPABASE_ANON_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}")
+          set -euo pipefail
 
-          HTTP_BODY=$(echo "$RESPONSE" | sed '$d')
-          HTTP_STATUS=$(echo "$RESPONSE" | tail -n 1)
+          ping_workspace() {
+            local label="$1"
+            local base_url="${2%/}"
+            local public_key="$3"
+            local email="$4"
+            local password="$5"
 
-          echo "Response Status: $HTTP_STATUS"
-          
-          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-            echo "Successfully pinged Supabase."
-            exit 0
-          else
-            echo "Ping failed with response: $HTTP_BODY"
-            exit 1
-          fi
+            if [ -z "$base_url" ] || [ -z "$public_key" ]; then
+              echo "::error::Missing Supabase URL or public publishable/anon key for ${label}."
+              return 1
+            fi
+            if [[ "$public_key" == sb_secret_* ]]; then
+              echo "::error::Refusing to use a secret key in ${label} ping workflow."
+              return 1
+            fi
+
+            # 1. Verify Auth health endpoint (does not itself guarantee Postgres inactivity timer reset).
+            local auth_status
+            auth_status=$(curl -sS -o /dev/null -w "%{http_code}" -X GET "${base_url}/auth/v1/health" \
+              -H "apikey: ${public_key}")
+            echo "${label} /auth/v1/health -> HTTP ${auth_status}"
+            if [ "$auth_status" -lt 200 ] || [ "$auth_status" -ge 300 ]; then
+              echo "::error::${label} Auth health check failed (HTTP ${auth_status})."
+              return 1
+            fi
+
+            # 2. Anonymous REST table reads are intentionally revoked (HTTP 401); sign in as an ordinary
+            # non-privileged evaluation user so PostgREST executes an actual RLS-scoped Postgres SELECT.
+            if [ -z "$email" ] || [ -z "$password" ]; then
+              echo "::error::Missing non-privileged ${label} credentials (EVAL_${label^^}_EMAIL / EVAL_${label^^}_PASSWORD); /auth/v1/health alone does not guarantee Postgres keep-alive."
+              return 1
+            fi
+
+            local token_file body_file
+            token_file=$(mktemp)
+            body_file=$(mktemp)
+            trap 'rm -f "$token_file" "$body_file"' RETURN
+
+            local auth_code access_token
+            auth_code=$(curl -sS -o "$token_file" -w "%{http_code}" -X POST "${base_url}/auth/v1/token?grant_type=password" \
+              -H "apikey: ${public_key}" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 -c 'import json,os; print(json.dumps({"email": os.environ["E"], "password": os.environ["P"]}))' E="$email" P="$password")")
+            if [ "$auth_code" -ne 200 ]; then
+              echo "::error::${label} evaluation user sign-in failed (HTTP ${auth_code})."
+              return 1
+            fi
+
+            access_token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["access_token"])' "$token_file")
+            if [ -z "$access_token" ]; then
+              echo "::error::${label} sign-in returned no access token."
+              return 1
+            fi
+
+            local rest_status
+            rest_status=$(curl -sS -o "$body_file" -w "%{http_code}" -X GET "${base_url}/rest/v1/projects?select=id&limit=1" \
+              -H "apikey: ${public_key}" \
+              -H "Authorization: Bearer ${access_token}")
+            echo "${label} authenticated GET /rest/v1/projects -> HTTP ${rest_status}"
+            if [ "$rest_status" -lt 200 ] || [ "$rest_status" -ge 300 ]; then
+              echo "::error::${label} authenticated PostgreSQL REST check failed (HTTP ${rest_status})."
+              return 1
+            fi
+          }
+
+          ping_workspace "personal" "$PERSONAL_URL" "$PERSONAL_KEY" "$PERSONAL_EMAIL" "$PERSONAL_PASSWORD"
+          ping_workspace "enterprise" "$ENTERPRISE_URL" "$ENTERPRISE_KEY" "$ENTERPRISE_EMAIL" "$ENTERPRISE_PASSWORD"

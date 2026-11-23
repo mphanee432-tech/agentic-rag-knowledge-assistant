@@ -10,21 +10,128 @@ import { createServerClient } from "@/lib/supabase/server"
 export class HttpError extends Error {
   constructor(public status: number, message: string) { super(message) }
 }
+
+const AUTH_REQUEST_TIMEOUT_MS = 5000
+const AUTH_VALIDATION_TIMEOUT_MS = 8000
+const MAX_REFRESH_TOKEN_ATTEMPTS = 2
+
+function isRetryableAuthError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const candidate = error as { name?: unknown; status?: unknown }
+  if (candidate.name === "AuthRetryableFetchError") return true
+  if (candidate.status === 0) return true
+  return typeof candidate.status === "number" && candidate.status >= 500 && candidate.status < 600
+}
+
+function syntheticAuthAbortResponse(status: number, message: string, code: string): Response {
+  return new Response(JSON.stringify({ message, error_code: code }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
+
 export async function requireUser(req?: Request, scope: WorkspaceScope = "personal") {
+  if (req?.signal?.aborted) {
+    throw req.signal.reason instanceof Error ? req.signal.reason : new Error("Request aborted.")
+  }
+
   const token = req?.headers.get("authorization")?.match(/^Bearer (.+)$/i)?.[1]
+  const timeoutController = new AbortController()
+  let authInFlight = true
+  let timedOut = false
+  let sawUpstreamFailure = false
+  let refreshAttempts = 0
+
+  // Bound Supabase Auth validation and short-circuit GoTrue's 30s refresh retry loop on outage/timeout.
+  const authFetch: typeof fetch = async (input, init) => {
+    if (!authInFlight) {
+      return globalThis.fetch(input, init)
+    }
+    if (req?.signal?.aborted) {
+      return syntheticAuthAbortResponse(408, "Authentication cancelled.", "auth_cancelled")
+    }
+    if (timedOut || timeoutController.signal.aborted) {
+      return syntheticAuthAbortResponse(408, "Authentication timed out.", "auth_timeout")
+    }
+
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    const isRefreshRequest = requestUrl.includes("/auth/v1/token") && requestUrl.includes("refresh_token")
+    if (isRefreshRequest) {
+      refreshAttempts++
+      if (refreshAttempts > MAX_REFRESH_TOKEN_ATTEMPTS) {
+        sawUpstreamFailure = true
+        return syntheticAuthAbortResponse(408, "Authentication refresh aborted.", "auth_refresh_exhausted")
+      }
+    }
+
+    const perRequestSignal = AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS)
+    const signals: AbortSignal[] = [timeoutController.signal, perRequestSignal]
+    if (init?.signal) signals.push(init.signal)
+    if (req?.signal) signals.push(req.signal)
+    const signal = AbortSignal.any(signals)
+
+    try {
+      const response = await globalThis.fetch(input, { ...init, signal })
+      if (response.status >= 500) {
+        sawUpstreamFailure = true
+      }
+      return response
+    } catch (error) {
+      if (perRequestSignal.aborted || timeoutController.signal.aborted) {
+        timedOut = true
+      } else if (!req?.signal?.aborted) {
+        sawUpstreamFailure = true
+      }
+      throw error
+    }
+  }
+
   let supabase: SupabaseClient
   if (token) {
     const { url, key } = resolveWorkspacePublicSupabaseConfig(scope, readPublicEnvForBrowser())
     supabase = createClient(url, key, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
+      global: { headers: { Authorization: `Bearer ${token}` }, fetch: authFetch },
       auth: { persistSession: false, autoRefreshToken: false },
     })
   } else {
-    supabase = await createServerClient(scope)
+    supabase = await createServerClient(scope, { fetch: authFetch })
   }
-  const { data: { user }, error } = await supabase.auth.getUser(token)
-  if (error || !user) throw new HttpError(401, "Sign in to continue.")
-  return { supabase, user, scope }
+
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+  let onRequestAbort: (() => void) | undefined
+  const getUserPromise = supabase.auth.getUser(token)
+  getUserPromise.catch(() => undefined)
+  try {
+    const { data: { user }, error } = await Promise.race([
+      getUserPromise,
+      new Promise<never>((_, reject) => {
+        deadlineTimer = setTimeout(() => {
+          timedOut = true
+          timeoutController.abort()
+          reject(new HttpError(504, "Authentication timed out. Please try again."))
+        }, AUTH_VALIDATION_TIMEOUT_MS)
+        if (req?.signal) {
+          onRequestAbort = () => reject(req.signal.reason instanceof Error ? req.signal.reason : new Error("Request aborted."))
+          req.signal.addEventListener("abort", onRequestAbort, { once: true })
+        }
+      }),
+    ])
+    if (req?.signal?.aborted) {
+      throw req.signal.reason instanceof Error ? req.signal.reason : new Error("Request aborted.")
+    }
+    if (timedOut) {
+      throw new HttpError(504, "Authentication timed out. Please try again.")
+    }
+    if (sawUpstreamFailure || (error && isRetryableAuthError(error))) {
+      throw new HttpError(503, "Unable to verify your session right now. Please try again.")
+    }
+    if (error || !user) throw new HttpError(401, "Sign in to continue.")
+    return { supabase, user, scope }
+  } finally {
+    authInFlight = false
+    if (deadlineTimer) clearTimeout(deadlineTimer)
+    if (req?.signal && onRequestAbort) req.signal.removeEventListener("abort", onRequestAbort)
+  }
 }
 
 export interface EnterpriseAccountStatusRow {

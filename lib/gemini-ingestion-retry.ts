@@ -1,5 +1,6 @@
-async function sleep(ms: number, signal: AbortSignal) {
+export async function sleep(ms: number, signal: AbortSignal) {
   signal.throwIfAborted()
+  if (ms <= 0) return
   await new Promise<void>((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(timer)
@@ -15,13 +16,28 @@ async function sleep(ms: number, signal: AbortSignal) {
 
 export function getGeminiErrorStatus(error: unknown): number | undefined {
   if (!error || typeof error !== "object") return undefined
-  const { status } = error as { status?: unknown }
-  return typeof status === "number" ? status : undefined
+  const err = error as { status?: unknown; statusCode?: unknown; cause?: unknown }
+  if (typeof err.status === "number") return err.status
+  if (typeof err.statusCode === "number") return err.statusCode
+  if (err.cause && typeof err.cause === "object") {
+    const cause = err.cause as { status?: unknown; statusCode?: unknown }
+    if (typeof cause.status === "number") return cause.status
+    if (typeof cause.statusCode === "number") return cause.statusCode
+  }
+  return undefined
 }
 
 export function isAbortOrTimeoutError(error: unknown): boolean {
-  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")
+  if (!(error instanceof Error)) return false
+  if (error.name === "AbortError" || error.name === "TimeoutError") return true
+  const cause = (error as { cause?: unknown }).cause
+  return cause instanceof Error && (cause.name === "AbortError" || cause.name === "TimeoutError")
 }
+
+const TRANSIENT_NETWORK_CODES = [
+  "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+]
 
 export function isTransientGeminiError(error: unknown): boolean {
   const status = getGeminiErrorStatus(error)
@@ -29,9 +45,7 @@ export function isTransientGeminiError(error: unknown): boolean {
   if (isAbortOrTimeoutError(error)) return true
   if (!error || typeof error !== "object") return false
   const network = error as { code?: unknown; cause?: { code?: unknown } }
-  return ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EPIPE",
-    "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET"]
-    .includes(String(network.cause?.code ?? network.code))
+  return TRANSIENT_NETWORK_CODES.includes(String(network.cause?.code ?? network.code))
 }
 
 // The SDK's ApiError drops response headers; preserve Retry-After without retaining its body.
@@ -41,7 +55,7 @@ export const geminiIngestionFetch: typeof fetch = async (input, init) => {
   const error = Object.assign(new Error("Gemini HTTP request failed."), {
     status: response.status, retryAfter: response.headers.get("retry-after"),
   })
-  await response.body?.cancel().catch(() => {})
+  await response.body?.cancel().catch(() => { })
   throw error
 }
 
@@ -94,6 +108,57 @@ export async function withGeminiRetry<T>(
       signal.throwIfAborted()
       if (eligible && !willRetry) throw new DOMException("Ingestion deadline exhausted before retry.", "TimeoutError")
       if (!willRetry) throw error
+      await sleep(delay, signal)
+    }
+  }
+  throw new Error("Gemini attempts exhausted.")
+}
+
+export interface TransientRetryOptions {
+  signal: AbortSignal
+  maxAttempts: number
+  attemptTimeoutMs: number
+  totalTimeoutMs: number
+  baseDelayMs?: number
+  onRetry?: () => void
+}
+
+/**
+ * Bounded retry wrapper for transient Gemini orchestration/generation calls.
+ * Enforces both per-attempt timeouts and an overall ceiling, never retrying after caller cancellation.
+ */
+export async function withTransientGeminiRetry<T>(
+  operation: (attemptSignal: AbortSignal) => Promise<T>,
+  { signal, maxAttempts, attemptTimeoutMs, totalTimeoutMs, baseDelayMs = 250, onRetry }: TransientRetryOptions,
+): Promise<{ result: T; retries: number }> {
+  const deadline = Date.now() + totalTimeoutMs
+  const attempts = Math.max(1, maxAttempts)
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    signal.throwIfAborted()
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw new DOMException("Gemini operation deadline exhausted.", "TimeoutError")
+    }
+    const timeoutMs = Math.min(attemptTimeoutMs, remaining)
+    const attemptSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    try {
+      const result = await operation(attemptSignal)
+      signal.throwIfAborted()
+      return { result, retries: attempt - 1 }
+    } catch (error) {
+      signal.throwIfAborted()
+      const timedOutAttempt = attemptSignal.aborted && !signal.aborted
+      const transient = timedOutAttempt || isTransientGeminiError(error)
+      const effectiveBase =
+        baseDelayMs > 0 && getGeminiErrorStatus(error) === 429
+          ? Math.max(baseDelayMs, 2000)
+          : baseDelayMs
+      const jittered = Math.round(effectiveBase * 2 ** (attempt - 1) * (1 + Math.random() * 0.25))
+      const delay = Math.max(jittered, retryAfterMs(error))
+      const remainingAfterAttempt = deadline - Date.now()
+      const canRetry = !signal.aborted && transient && attempt < attempts && delay < remainingAfterAttempt
+      if (!canRetry) throw error
+      onRetry?.()
       await sleep(delay, signal)
     }
   }

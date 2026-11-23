@@ -223,6 +223,32 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "D01 document custodian" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      searchCalls === 1
+                        ? { sufficient: false, reason: "requested_policy_missing", nextAction: "retry_retrieval", reformulatedQuery: "D01 DOCUMENT CONTROL custodian", clarificationQuestion: null }
+                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           genCalls++
           return Response.json({
             candidates: [{ content: { role: "model", parts: [{ text: "The D01 custodian is HR Manager [Chunk 1]." }] }, finishReason: "STOP" }],
@@ -234,11 +260,12 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
       if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
         return Response.json([{ organization_id: ORG_ID, can_upload_policy: true }])
       }
+      if (url.pathname === "/rest/v1/demo_jira_access") return Response.json({ enabled: false })
+      if (url.pathname === "/rest/v1/rpc/enterprise_account_status") return Response.json([{ organization_id: ORG_ID, role: "employee", is_active: true }])
       if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
         searchCalls++
         const body = JSON.parse(String(init?.body))
         if (searchCalls === 1) {
-          // Attempt 1 returns unrelated text (missing D01 custodian) -> evaluator triggers reformulated Attempt 2
           return Response.json([{ id: "99999999-9999-4999-8999-999999999999", content: "D02 Leave Attendance Policy notice period." }])
         }
         assert.match(body.query_text, /DOCUMENT CONTROL custodian/i)
@@ -269,11 +296,25 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
   await t.test("Enterprise Option B loop refuses safely after bounded empty retrieval and preserves Jira UI confirmation", async st => {
     let geminiCalls = 0
     let searchCalls = 0
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.hostname === "generativelanguage.googleapis.com") {
         if (url.pathname.endsWith(":batchEmbedContents") || url.pathname.endsWith(":embedContent")) {
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+        }
+        const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+          tools?: unknown[]
+          generationConfig?: { responseJsonSchema?: unknown }
+        }
+        if (reqBody.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "office cafeteria sushi menu" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (reqBody.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, reason: "no_chunks_retrieved", nextAction: "retry_retrieval", reformulatedQuery: "cafeteria lunch menu", clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+          })
         }
         geminiCalls++
         assert.fail("Generation LLM must not be called when 0 chunks are retrieved")
@@ -282,6 +323,8 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
       if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
         return Response.json([{ organization_id: ORG_ID, can_upload_policy: true }])
       }
+      if (url.pathname === "/rest/v1/demo_jira_access") return Response.json({ enabled: false })
+      if (url.pathname === "/rest/v1/rpc/enterprise_account_status") return Response.json([{ organization_id: ORG_ID, role: "employee", is_active: true }])
       if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
         searchCalls++
         return Response.json([])
@@ -341,17 +384,33 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
 
   await t.test("POST /api/chat executes jira_status directly for natural status queries without invoking RAG or LLM", async st => {
     let statusWebhookCalls = 0
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-1", role: "authenticated" })
       if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
         return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
       }
+      if (url.pathname === "/rest/v1/demo_jira_access") return Response.json({ enabled: false })
+      if (url.pathname === "/rest/v1/rpc/enterprise_account_status") return Response.json([{ organization_id: ORG_ID, role: "employee", is_active: true }])
+      if (url.hostname === "generativelanguage.googleapis.com" && url.pathname.endsWith(":generateContent")) {
+        const reqBody = JSON.parse(String(init?.body ?? "{}")) as { contents?: Array<{ parts?: Array<{ text?: string }> }> }
+        const promptText = JSON.stringify(reqBody.contents ?? "")
+        const match = promptText.match(/\b([A-Z]+-\d+)\b/i)
+        return Response.json({
+          candidates: [{
+            content: {
+              role: "model",
+              parts: [{ functionCall: { name: "jira_status", args: { issueKey: match ? match[1].toUpperCase() : null } } }],
+            },
+            finishReason: "STOP",
+          }],
+        })
+      }
       if (url.hostname === "jira-status.invalid") {
         statusWebhookCalls++
         return Response.json({ success: true, ticketKey: "ECD-6", status: "In Progress", summary: "VPN disconnects" })
       }
-      assert.fail(`No embedding, retrieval, or LLM call expected for jira_status: ${url.href}`)
+      assert.fail(`No embedding or retrieval call expected for jira_status: ${url.href}`)
     })
 
     const jsonRes = await chatPost(new Request("https://app.invalid/api/chat", {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { createClient } from "@supabase/supabase-js"
-import { retrieveVerifiedChunks } from "../lib/retrieve-chunks"
+import { retrieveVerifiedChunks, toPersonalSparseQueryText } from "../lib/retrieve-chunks"
 
 test("retrieval returns only authoritative indexed project chunks in ranked order", async t => {
   const client = createClient("https://retrieval-test.invalid", "test-service", {
@@ -74,5 +74,22 @@ test("retrieval returns only authoritative indexed project chunks in ranked orde
       ? Response.json([{ id: "foreign", content: "Untrusted" }])
       : Response.json({ message: "verification failed" }, { status: 403 }))
     await assert.rejects(run().result, error => (error as { message: string }).message === "verification failed")
+  })
+
+  await t.test("Personal sparse query helper distills long queries while preserving short and Enterprise queries", () => {
+    assert.equal(toPersonalSparseQueryText("Question"), "Question")
+    assert.equal(toPersonalSparseQueryText("avoid Kafka small chunks"), "avoid Kafka small chunks")
+    assert.equal(
+      toPersonalSparseQueryText("PostgreSQL backups recovery RPO frequency"),
+      "PostgreSQL backups recovery RPO frequency",
+    )
+    assert.equal(
+      toPersonalSparseQueryText("Production RAG blueprint chunk count Kafka Kubernetes vector database multi LLM agents"),
+      "kafka kubernetes llm",
+    )
+    assert.equal(
+      toPersonalSparseQueryText("Below what chunk count does the Production RAG blueprint recommend deliberately avoiding Kafka, Kubernetes, a dedicated vector database, or multiple LLM agents?"),
+      "kafka kubernetes llm",
+    )
   })
 })

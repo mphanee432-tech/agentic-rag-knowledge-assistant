@@ -167,7 +167,12 @@ export function ChatContainer({
       return
     }
     if (decision.tool !== "jira_create_draft") {
-      return sendChat(query, projectId, organizationId, resolvedLastTicketKey)
+      return sendChat(query, projectId, organizationId, resolvedLastTicketKey, (draft) => {
+        if (!enterprise || !canDraftJira) return
+        const currentStore = useChatStore.getState()
+        draftContextRef.current = { accountId: currentStore.accountId, activeProjectId: currentStore.activeProjectId }
+        openJiraDraft(draft)
+      })
     }
 
     const { draft } = decision

@@ -112,6 +112,11 @@ test("ingestion uses fenced recovery for transient failures and stops on invalid
             return Response.json({ embeddings: [{ values: scenario.invalidEmbedding ? [] : Array(1536).fill(0.1) }] })
           }
           if (url.pathname.endsWith(":generateContent")) {
+            assert.match(
+              url.pathname,
+              /\/models\/gemini-3\.5-flash-lite:generateContent$/,
+              "Ingestion extraction and suggested queries must use the configured default model",
+            )
             const request = JSON.parse(String(init?.body))
             if (request.contents?.[0]?.parts?.some((part: { inlineData?: unknown }) => part.inlineData)) {
               const status = scenario.extractionStatuses?.[extractionCalls++] ?? 200

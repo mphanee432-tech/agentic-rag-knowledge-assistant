@@ -353,3 +353,251 @@ test("WP9.25: shared ChatInput displays updated placeholder in both Personal RAG
   assert.match(chatInputSource, /if \(e\.key === "Enter" && !e\.shiftKey\)/)
   assert.match(chatInputSource, /await onSendMessage\(trimmed\)/)
 })
+
+test("Agent Activity captures real server telemetry, stays collapsed by default, and excludes private metadata from history", async t => {
+  const initial = useChatStore.getState()
+  t.after(() => useChatStore.setState(initial, true))
+  const store = useChatStore.getState()
+  store.setAccount("pm-demo-user")
+  store.setActiveProject(projectId)
+
+  const requests: Array<{ messages: Array<{ role: string; content: string }> }> = []
+  t.mock.method(globalThis, "fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(JSON.parse(String(init?.body)))
+    if (requests.length === 1) {
+      return response([
+        { type: "metadata", interactionId: "int-1", citations },
+        { type: "text", text: "Recovered answer [Chunk 1]." },
+        {
+          type: "finish",
+          metrics: {
+            internal_metric: 999,
+            agent: {
+              tool: "rag_retrieval",
+              decision_mode: "llm",
+              steps: 6,
+              max_steps: 6,
+              retrieval_attempts: 2,
+              max_retrieval_attempts: 2,
+              reformulated: true,
+              evidence_sufficient: true,
+              evidence_reason: "HIDDEN_PROMPT_OR_PRIVATE_REASONING",
+              next_action: "answer",
+              final_outcome: "answer",
+              retrieval_steps: [
+                { attempt: 1, authorized_chunks: 1, decision: "retry_retrieval" },
+                { attempt: 2, authorized_chunks: 2, merged_authorized_chunks: 3, decision: "answer" },
+              ],
+            },
+          },
+        },
+      ])
+    }
+    return response([
+      { type: "metadata", citations },
+      { type: "text", text: "Single attempt answer [Chunk 1]." },
+      {
+        type: "finish",
+        metrics: {
+          agent: {
+            tool: "rag_retrieval",
+            decision_mode: "llm",
+            steps: 4,
+            max_steps: 6,
+            retrieval_attempts: 1,
+            max_retrieval_attempts: 2,
+            reformulated: false,
+            evidence_sufficient: true,
+            next_action: "answer",
+            final_outcome: "answer",
+            retrieval_steps: [
+              { attempt: 1, authorized_chunks: 2, decision: "answer" },
+            ],
+          },
+        },
+      },
+    ])
+  })
+
+  await sendChat("First question?", projectId)
+  const retryMessage = useChatStore.getState().messages.at(-1)!
+  assert.equal(retryMessage.content, "Recovered answer [Chunk 1].")
+  assert.deepEqual(retryMessage.agentActivity, {
+    status: "completed",
+    decisionMode: "llm",
+    tool: "rag_retrieval",
+    steps: 6,
+    maxSteps: 6,
+    retrievalAttempts: 2,
+    maxRetrievalAttempts: 2,
+    reformulated: true,
+    finalOutcome: "answer",
+    retrievalSteps: [
+      { attempt: 1, authorized_chunks: 1, decision: "retry_retrieval" },
+      { attempt: 2, authorized_chunks: 2, merged_authorized_chunks: 3, decision: "answer" },
+    ],
+  })
+
+  const retryHtml = renderToStaticMarkup(createElement(MessageItem, { message: retryMessage }))
+  assert.match(retryHtml, /<details\b[^>]*><summary\b[^>]*>Agent Activity<\/summary>/)
+  assert.ok(!/<details\b[^>]*\bopen\b/.test(retryHtml), "Agent Activity must be collapsed by default")
+  assert.ok(retryHtml.includes("Decision mode"))
+  assert.ok(retryHtml.includes(">LLM<"))
+  assert.ok(retryHtml.includes("RAG retrieval (rag_retrieval)"))
+  assert.ok(retryHtml.includes("Retrieval attempt 1"))
+  assert.ok(retryHtml.includes("1 authorized chunk"))
+  assert.ok(retryHtml.includes("LLM evidence decision"))
+  assert.ok(retryHtml.includes(">retry<"))
+  assert.ok(retryHtml.includes("Retrieval attempt 2"))
+  assert.ok(retryHtml.includes("2 authorized chunks (3 merged)"))
+  assert.ok(retryHtml.includes("Total agent steps"))
+  assert.ok(retryHtml.includes("6 / 6"))
+  assert.ok(!retryHtml.includes("HIDDEN_PROMPT_OR_PRIVATE_REASONING"))
+  assert.ok(!retryHtml.includes("internal_metric"))
+
+  await sendChat("Follow-up question?", projectId)
+  assert.deepEqual(requests[1].messages, [
+    { role: "user", content: "First question?" },
+    { role: "assistant", content: "Recovered answer [Chunk 1]." },
+  ])
+  const serializedHistory = JSON.stringify(requests[1].messages)
+  assert.ok(!serializedHistory.includes("agentActivity"))
+  assert.ok(!serializedHistory.includes("rag_retrieval"))
+
+  const singleAttemptMessage = useChatStore.getState().messages.at(-1)!
+  const singleHtml = renderToStaticMarkup(createElement(MessageItem, { message: singleAttemptMessage }))
+  assert.ok(singleHtml.includes("Retrieval attempt 1"))
+  assert.ok(singleHtml.includes("2 authorized chunks"))
+  assert.ok(!singleHtml.includes("Retrieval attempt 2"), "Attempt 2 must not render when only 1 attempt occurred")
+  assert.ok(singleHtml.includes("4 / 6"))
+
+  const deterministicMessage: ChatMessage = {
+    id: "det-1",
+    role: "assistant",
+    content: "Hello! How can I help you?",
+    agentActivity: {
+      decisionMode: "deterministic",
+      tool: "deterministic_reply",
+      steps: 2,
+      maxSteps: 6,
+      retrievalAttempts: 0,
+      maxRetrievalAttempts: 2,
+      reformulated: false,
+      finalOutcome: "tool_executed",
+      retrievalSteps: [],
+    },
+  }
+  const deterministicHtml = renderToStaticMarkup(createElement(MessageItem, { message: deterministicMessage }))
+  assert.ok(deterministicHtml.includes("Deterministic shortcut"))
+  assert.ok(deterministicHtml.includes("Deterministic reply (deterministic_reply)"))
+  assert.ok(deterministicHtml.includes("Tool executed"))
+  assert.ok(deterministicHtml.includes("2 / 6"))
+  assert.ok(!deterministicHtml.includes("Retrieval attempt 1"))
+})
+
+test("Live Agent Activity updates incrementally before finish/text and handles interrupted stream failure clearly", async t => {
+  const initial = useChatStore.getState()
+  t.after(() => useChatStore.setState(initial, true))
+  const store = useChatStore.getState()
+  store.setAccount("pm-live-demo")
+  store.setActiveProject(projectId)
+
+  let enqueue!: (event: ChatEvent) => void
+  let closeStream!: () => void
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(controller) {
+      enqueue = (event) => controller.enqueue(Buffer.from(encodeEvent(event)))
+      closeStream = () => controller.close()
+    },
+  }), { headers: { "Content-Type": "text/event-stream" } }))
+
+  const snapshots: string[] = []
+  const unsubscribe = useChatStore.subscribe((state) => {
+    const assistant = state.messages.at(-1)
+    if (assistant?.role === "assistant" && assistant.agentActivity) {
+      snapshots.push(renderToStaticMarkup(createElement(MessageItem, { message: assistant, isStreaming: state.isLoading })))
+    }
+  })
+  t.after(unsubscribe)
+
+  const pending = sendChat("Live progress question?", projectId)
+  await new Promise((resolve) => setImmediate(resolve))
+
+  // Immediately upon submit, live Agent Activity is shown above the pending answer without fabricated steps.
+  const initialLiveHtml = snapshots.at(-1) ?? ""
+  assert.ok(initialLiveHtml.includes("Agent Activity (In progress)"))
+  assert.ok(initialLiveHtml.includes("Selecting tool (in progress)"))
+  assert.ok(initialLiveHtml.indexOf("Agent Activity (In progress)") < initialLiveHtml.indexOf("Waiting for response"))
+  assert.ok(!initialLiveHtml.includes("Retrieval attempt 1"))
+
+  enqueue({ type: "agent_step", step: { phase: "tool_selected", decisionMode: "llm", tool: "rag_retrieval" } })
+  enqueue({ type: "agent_step", step: { phase: "retrieval_attempt_1_started" } })
+  await new Promise((resolve) => setImmediate(resolve))
+  const attempt1StartedHtml = snapshots.at(-1) ?? ""
+  assert.ok(attempt1StartedHtml.includes("RAG retrieval (rag_retrieval)"))
+  assert.ok(attempt1StartedHtml.includes("Retrieval attempt 1"))
+  assert.ok(attempt1StartedHtml.includes("In progress"))
+  assert.ok(!attempt1StartedHtml.includes("authorized chunk"))
+
+  enqueue({ type: "agent_step", step: { phase: "retrieval_attempt_1_completed", authorizedChunks: 1 } })
+  enqueue({ type: "agent_step", step: { phase: "evidence_decision_1", decisionMode: "llm", decision: "retry_retrieval" } })
+  enqueue({ type: "agent_step", step: { phase: "retrieval_attempt_2_started" } })
+  await new Promise((resolve) => setImmediate(resolve))
+  const attempt2StartedHtml = snapshots.at(-1) ?? ""
+  assert.ok(attempt2StartedHtml.includes("1 authorized chunk"))
+  assert.ok(attempt2StartedHtml.includes(">retry<"))
+  assert.ok(attempt2StartedHtml.includes("Retrieval attempt 2"))
+  assert.ok(attempt2StartedHtml.includes("In progress"))
+
+  enqueue({ type: "agent_step", step: { phase: "retrieval_attempt_2_completed", authorizedChunks: 2, mergedAuthorizedChunks: 3 } })
+  enqueue({ type: "agent_step", step: { phase: "evidence_decision_2", decisionMode: "llm", decision: "answer" } })
+  enqueue({ type: "agent_step", step: { phase: "final_decision", outcome: "answer", steps: 6, maxSteps: 6 } })
+  enqueue({ type: "metadata", citations })
+  enqueue({ type: "text", text: "Live recovered answer [Chunk 1]." })
+  enqueue({
+    type: "finish",
+    metrics: {
+      agent: {
+        tool: "rag_retrieval",
+        decision_mode: "llm",
+        steps: 6,
+        max_steps: 6,
+        retrieval_attempts: 2,
+        max_retrieval_attempts: 2,
+        reformulated: true,
+        next_action: "answer",
+        final_outcome: "answer",
+        retrieval_steps: [
+          { attempt: 1, authorized_chunks: 1, decision: "retry_retrieval" },
+          { attempt: 2, authorized_chunks: 2, merged_authorized_chunks: 3, decision: "answer" },
+        ],
+      },
+    },
+  })
+  closeStream()
+  await pending
+
+  // Once finished, Agent Activity transitions to the collapsed-by-default completed panel below the answer.
+  const finishedMsg = useChatStore.getState().messages.at(-1)!
+  const finishedHtml = renderToStaticMarkup(createElement(MessageItem, { message: finishedMsg, isStreaming: false }))
+  assert.match(finishedHtml, /<details\b[^>]*><summary\b[^>]*>Agent Activity<\/summary>/)
+  assert.ok(!/<details\b[^>]*\bopen\b/.test(finishedHtml))
+  assert.ok(finishedHtml.indexOf("Live recovered answer") < finishedHtml.indexOf("Agent Activity"))
+
+  // Stream interruption/failure shows a clear failed state rather than completed steps.
+  const pendingError = sendChat("Interrupted stream question?", projectId)
+  await new Promise((resolve) => setImmediate(resolve))
+  enqueue({ type: "agent_step", step: { phase: "tool_selected", decisionMode: "llm", tool: "rag_retrieval" } })
+  enqueue({ type: "agent_step", step: { phase: "retrieval_attempt_1_completed", authorizedChunks: 1 } })
+  enqueue({ type: "error", message: "The answer could not be completed. Please retry." })
+  closeStream()
+  await pendingError
+
+  const failedMsg = useChatStore.getState().messages.at(-1)!
+  assert.equal(failedMsg.agentActivity?.status, "failed")
+  assert.equal(failedMsg.agentActivity?.finalOutcome, undefined)
+  const failedHtml = renderToStaticMarkup(createElement(MessageItem, { message: failedMsg, isStreaming: false }))
+  assert.ok(failedHtml.includes("Agent Activity (Interrupted / failed)"))
+  assert.ok(failedHtml.includes("Interrupted / failed before completion"))
+  assert.ok(!failedHtml.includes("Final outcome"))
+})

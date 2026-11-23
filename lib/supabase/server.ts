@@ -8,11 +8,15 @@ import {
 
 export const createClient = createServerClient
 
-export async function createServerClient(scope: WorkspaceScope = "personal") {
+export async function createServerClient(
+  scope: WorkspaceScope = "personal",
+  options?: { fetch?: typeof fetch },
+) {
   const cookieStore = await cookies()
   const { url, key, cookieName } = resolveWorkspacePublicSupabaseConfig(scope, readPublicEnvForBrowser())
 
   return createSupabaseServerClient(url, key, {
+    ...(options?.fetch ? { global: { fetch: options.fetch } } : {}),
     cookieOptions: {
       name: cookieName,
     },

@@ -3,10 +3,11 @@ import { APICallError, streamText, generateText, type LanguageModelUsage } from 
 import { GoogleGenAI } from '@google/genai';
 import { getEnterpriseCopilotContext, HttpError, isJiraAccessAvailable, requireChatProject, requireUser } from '@/lib/auth';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAnswer, NO_EVIDENCE, MAX_ANSWER_CHARS, type ChatEvent } from '@/lib/chat-contract';
+import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAnswer, NO_EVIDENCE, MAX_ANSWER_CHARS, type AgentStepEventData, type ChatEvent } from '@/lib/chat-contract';
 import { getSystemPrompt } from '@/lib/prompts/systemPrompt';
 
 import {
+  getDeterministicIntent,
   getDeterministicResponse,
   parseChatInput,
 } from '@/lib/chat-input';
@@ -14,9 +15,12 @@ import {
   MAX_AGENT_STEPS,
   MAX_RETRIEVAL_ATTEMPTS,
   runBoundedRetrievalLoop,
-  selectAgentTool,
+  type AgentToolDecision,
   type AgentTrace,
+  type TokenCounts,
 } from '@/lib/agent-loop';
+import { evaluateEvidenceWithLlm, selectAgentToolWithLlm } from '@/lib/llm-agent';
+import { getGeminiErrorStatus, isAbortOrTimeoutError, isTransientGeminiError, sleep, withTransientGeminiRetry } from '@/lib/gemini-ingestion-retry';
 import { retrieveVerifiedChunks } from '@/lib/retrieve-chunks';
 import { withTimeout } from '@/lib/with-timeout';
 import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citations';
@@ -31,7 +35,7 @@ import {
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Request failed';
 export const runtime = 'nodejs';
 
-type FailureStage = 'stream_initialization' | 'model_stream_iteration' | 'model_stream_finalization'
+type FailureStage = 'agent_decision' | 'stream_initialization' | 'model_stream_iteration' | 'model_stream_finalization'
   | 'answer_validation' | 'interaction_persistence' | 'sse_emission' | 'unknown';
 type FailureCategory = 'provider_timeout' | 'provider_error' | 'stream_interrupted' | 'generation_incomplete'
   | 'answer_empty' | 'answer_too_long' | 'invalid_citations' | 'interaction_write_failed'
@@ -116,10 +120,16 @@ export async function POST(req: Request) {
     const modelStage = failedStage === 'stream_initialization' || failedStage === 'model_stream_iteration'
       || failedStage === 'model_stream_finalization';
     failure.failure_stage = failedStage;
-    failure.failure_category = modelStage && generationDeadline?.aborted && generationSignal?.reason === generationDeadline.reason
+    const isCancellationError =
+      (modelStage && (cancelled || req.signal.aborted))
+      || (req.signal.aborted && (error === req.signal.reason || (error instanceof Error && error.name === 'AbortError')));
+    const isTimeoutFailure =
+      (modelStage && generationDeadline?.aborted && generationSignal?.reason === generationDeadline.reason)
+      || (!cancelled && !req.signal.aborted && isAbortOrTimeoutError(error));
+    failure.failure_category = isTimeoutFailure
       ? 'provider_timeout'
-      : (modelStage && (cancelled || req.signal.aborted)) || (req.signal.aborted && error === req.signal.reason) ? 'request_cancelled'
-      : APICallError.isInstance(error) ? 'provider_error' : category;
+      : isCancellationError ? 'request_cancelled'
+        : APICallError.isInstance(error) ? 'provider_error' : category;
     if (failure.failure_category === 'provider_error') {
       const sanitized = sanitizeProviderError(error);
       failure.provider_error_status = sanitized.status;
@@ -144,10 +154,11 @@ export async function POST(req: Request) {
     context_chars: null as number | null,
     embedding_ms: 0,
     retrieval_ms: 0,
+    agent_decision_ms: 0,
     ttft_ms: 0,
     generation_ms: 0,
     total_ms: 0,
-    retries: { embedding: 0, retrieval: 0, generation: 0 },
+    retries: { embedding: 0, retrieval: 0, generation: 0, agent_decision: 0 },
     agent: null as AgentTrace | null,
     errors: [] as string[],
     token_usage: { prompt: 0, completion: 0, total: 0 },
@@ -157,10 +168,12 @@ export async function POST(req: Request) {
     if (process.env.NODE_ENV !== 'development') return;
     // Errors can contain provider or document data; only a controlled category is logged.
     const { errors, ...diagnostics } = telemetry;
-    const record = { type: 'rag_timing', interaction_id: interactionId, status,
+    const record = {
+      type: 'rag_timing', interaction_id: interactionId, status,
       ...diagnostics, ...failure, had_first_text: telemetry.model_first_text_ms !== null,
       elapsed_ms: performance.now() - reqStart,
-      error_categories: status === 'success' && !errors.length ? [] : [status === 'cancelled' ? 'cancelled' : 'request_failed'] };
+      error_categories: status === 'success' && !errors.length ? [] : [status === 'cancelled' ? 'cancelled' : 'request_failed']
+    };
     setImmediate(() => console.info(JSON.stringify(record)));
   };
 
@@ -184,12 +197,61 @@ export async function POST(req: Request) {
     const promptVariant = req.headers.get('x-prompt-variant') || input.promptVariant;
     isEvalMode = !input.wantsStream && (input.isEvalMode || req.headers.get('x-eval-mode') === 'true');
     telemetry.request_mode = isEvalMode ? 'json' : 'stream';
-    const toolDecision = selectAgentTool(userQuery, {
-      isEnterprise: enterprise,
-      jiraAccessAvailable: false,
-      lastJiraTicketKey: extractLatestJiraTicketKeyFromMessages(boundedHistory) ?? lastJiraTicketKey,
-    });
-    const respondDirectToolReply = (responseText: string, agentTrace: AgentTrace) => {
+    const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
+    telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
+    const resolvedLastTicketKey = extractLatestJiraTicketKeyFromMessages(boundedHistory) ?? lastJiraTicketKey;
+    const exactDeterministicIntent = getDeterministicIntent(userQuery);
+    const decisionTokens: TokenCounts = { prompt: 0, completion: 0, total: 0 };
+    const addDecisionTokens = (next?: TokenCounts) => {
+      if (!next) return;
+      decisionTokens.prompt += next.prompt;
+      decisionTokens.completion += next.completion;
+      decisionTokens.total += next.total;
+      telemetry.token_usage = { ...decisionTokens };
+      telemetry.tokens = { ...decisionTokens };
+    };
+
+    let jiraAccessChecked = false;
+    let cachedJiraAccessAvailable = false;
+    const getJiraAccess = async () => {
+      if (!jiraAccessChecked) {
+        jiraAccessChecked = true;
+        cachedJiraAccessAvailable = await isJiraAccessAvailable(supabase, organizationId);
+      }
+      return enterprise ? cachedJiraAccessAvailable : false;
+    };
+
+    let toolDecision: AgentToolDecision;
+    const initialAgentSteps = 1;
+    let decisionMode: 'llm' | 'deterministic' = 'deterministic';
+    let toolSelectionMs = 0;
+
+    if (exactDeterministicIntent) {
+      toolDecision = { tool: 'deterministic_reply', intent: exactDeterministicIntent, requiresConfirmation: false };
+    } else {
+      stage = 'agent_decision';
+      const jiraAccessAvailable = enterprise ? await getJiraAccess() : false;
+      const llmSelection = await selectAgentToolWithLlm({
+        modelId: generationModelId,
+        userQuery,
+        isEnterprise: enterprise,
+        jiraAccessAvailable,
+        lastJiraTicketKey: resolvedLastTicketKey,
+        signal: req.signal,
+        onRetry: () => { telemetry.retries.agent_decision++; },
+      });
+      toolDecision = llmSelection.decision;
+      toolSelectionMs = llmSelection.decisionMs;
+      decisionMode = 'llm';
+      addDecisionTokens(llmSelection.tokens);
+      telemetry.agent_decision_ms = Math.round(toolSelectionMs);
+    }
+
+    const respondDirectToolReply = (
+      responseText: string,
+      agentTrace: AgentTrace,
+      draft?: { summary: string; description: string },
+    ) => {
       telemetry.retrieved_chunk_count = 0;
       telemetry.context_chars = 0;
       telemetry.agent = agentTrace;
@@ -210,6 +272,7 @@ export async function POST(req: Request) {
           context: '',
           citations: [],
           retrieved_chunks: [],
+          ...(draft ? { jiraDraft: draft } : {}),
           ...(!enterprise ? { interactionId } : {}),
           metrics: telemetry,
         }, { headers: directHeaders });
@@ -218,9 +281,27 @@ export async function POST(req: Request) {
         cancel() { cancelled = true; },
         start(controller) {
           try {
+            controller.enqueue(encodeEvent({
+              type: 'agent_step',
+              step: {
+                phase: 'tool_selected',
+                decisionMode: agentTrace.decision_mode,
+                tool: agentTrace.tool,
+              },
+            }));
+            controller.enqueue(encodeEvent({
+              type: 'agent_step',
+              step: {
+                phase: 'final_decision',
+                outcome: agentTrace.next_action,
+                steps: agentTrace.steps,
+                maxSteps: agentTrace.max_steps,
+              },
+            }));
             controller.enqueue(encodeEvent({ type: 'metadata', ...(!enterprise ? { interactionId } : {}), citations: [] }));
             telemetry.ttft_ms = Math.round(performance.now() - reqStart);
             telemetry.server_ttft_ms = performance.now() - reqStart;
+            if (draft) controller.enqueue(encodeEvent({ type: 'jira_draft', draft }));
             controller.enqueue(encodeEvent({ type: 'text', text: responseText }));
             telemetry.total_ms = Math.round(performance.now() - reqStart);
             telemetry.server_finish_ready_ms = performance.now() - reqStart;
@@ -247,7 +328,7 @@ export async function POST(req: Request) {
       const deterministicIntent = toolDecision.intent;
       const jiraEnabled = deterministicIntent === 'greeting'
         ? false
-        : await isJiraAccessAvailable(supabase, organizationId);
+        : await getJiraAccess();
       const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
       return respondDirectToolReply(deterministicResponse, {
         tool: 'deterministic_reply',
@@ -258,6 +339,9 @@ export async function POST(req: Request) {
         reformulated: false,
         evidence_sufficient: true,
         evidence_reason: 'deterministic_short_circuit',
+        decision_mode: decisionMode,
+        next_action: 'tool_executed',
+        decision_tokens: decisionTokens,
       });
     }
 
@@ -276,6 +360,9 @@ export async function POST(req: Request) {
         reformulated: false,
         evidence_sufficient: true,
         evidence_reason: 'tool_executed',
+        decision_mode: decisionMode,
+        next_action: 'tool_executed',
+        decision_tokens: decisionTokens,
       });
     }
 
@@ -288,8 +375,32 @@ export async function POST(req: Request) {
         max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
         reformulated: false,
         evidence_sufficient: true,
-        evidence_reason: 'deterministic_short_circuit',
+        evidence_reason: 'clarification_required',
+        decision_mode: decisionMode,
+        next_action: 'clarify',
+        clarification_question: JIRA_STATUS_CLARIFICATION_PROMPT,
+        decision_tokens: decisionTokens,
       });
+    }
+
+    if (toolDecision.tool === 'jira_create_draft' && enterprise && (await getJiraAccess())) {
+      return respondDirectToolReply(
+        'Please review and confirm the Jira ticket details below before creating it.',
+        {
+          tool: 'jira_create_draft',
+          steps: 2,
+          max_steps: MAX_AGENT_STEPS,
+          retrieval_attempts: 0,
+          max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+          reformulated: false,
+          evidence_sufficient: true,
+          evidence_reason: 'confirmation_required',
+          decision_mode: decisionMode,
+          next_action: 'confirmation_required',
+          decision_tokens: decisionTokens,
+        },
+        toolDecision.draft,
+      );
     }
     const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY });
     const maxEmbedRetries = 1;
@@ -315,8 +426,12 @@ export async function POST(req: Request) {
             break;
           }
         } catch (err: unknown) {
+          req.signal.throwIfAborted();
           if (attempt < maxEmbedRetries) {
             telemetry.retries.embedding++;
+            if (isTransientGeminiError(err)) {
+              await sleep(250, req.signal);
+            }
           } else {
             telemetry.errors.push(`Embedding: ${errorMessage(err)}`);
             throw err;
@@ -331,213 +446,286 @@ export async function POST(req: Request) {
     };
 
     // Bounded single-agent loop (<= 2 retrieval attempts, <= 6 agent steps); RLS always applies.
-    const { chunks: relevantChunks, agent: agentTrace } = await runBoundedRetrievalLoop({
-      userQuery,
-      retrieveForQuery: async (queryText) => {
-        const queryEmbedding = await embedQuery(queryText);
-        const tRetrievalStart = performance.now();
-        const found = await retrieveVerifiedChunks(
-          supabase,
-          projectId,
-          queryEmbedding,
-          queryText,
-          req.signal,
-          telemetry,
-          enterprise,
-          organizationId,
-        );
-        totalRetrievalMs += performance.now() - tRetrievalStart;
-        return found;
-      },
-    });
-    telemetry.embedding_ms = Math.round(totalEmbedMs);
-    telemetry.retrieval_ms = Math.round(totalRetrievalMs);
-    agentTrace.steps = Math.min(agentTrace.steps + 1, MAX_AGENT_STEPS); // Final answer/refusal step
-    telemetry.agent = agentTrace;
+    let evalDecisionMs = 0;
+    const runRagOrchestration = async (
+      loopSignal: AbortSignal,
+      onStep?: (step: AgentStepEventData) => void,
+    ) => {
+      const { chunks: relevantChunks, agent: agentTrace, finalDecision } = await runBoundedRetrievalLoop({
+        userQuery,
+        initialQuery: toolDecision.tool === 'rag_retrieval' ? (toolDecision.searchQuery ?? userQuery) : userQuery,
+        initialSteps: initialAgentSteps,
+        retrieveForQuery: async (queryText) => {
+          const queryEmbedding = await embedQuery(queryText);
+          const tRetrievalStart = performance.now();
+          const found = await retrieveVerifiedChunks(
+            supabase,
+            projectId,
+            queryEmbedding,
+            queryText,
+            loopSignal,
+            telemetry,
+            enterprise,
+            organizationId,
+          );
+          totalRetrievalMs += performance.now() - tRetrievalStart;
+          return found;
+        },
+        decideAfterRetrieval: async ({ chunks, attempt, canRetry, previousQueries }) => {
+          stage = 'agent_decision';
+          const tEvalStart = performance.now();
+          const ev = await evaluateEvidenceWithLlm({
+            modelId: generationModelId,
+            userQuery,
+            chunks,
+            attempt,
+            canRetry,
+            previousQueries,
+            isEnterprise: enterprise,
+            signal: loopSignal,
+            onRetry: () => { telemetry.retries.agent_decision++; },
+          });
+          evalDecisionMs += performance.now() - tEvalStart;
+          return ev;
+        },
+        onStep,
+      });
+      telemetry.embedding_ms = Math.round(totalEmbedMs);
+      telemetry.retrieval_ms = Math.round(totalRetrievalMs);
+      telemetry.agent_decision_ms = Math.round(toolSelectionMs + evalDecisionMs);
+      addDecisionTokens(agentTrace.decision_tokens);
+      agentTrace.steps = Math.min(agentTrace.steps + 1, MAX_AGENT_STEPS); // Final answer/refusal step
+      agentTrace.decision_tokens = { ...decisionTokens };
+      telemetry.agent = agentTrace;
+      onStep?.({
+        phase: 'final_decision',
+        outcome: finalDecision.nextAction,
+        steps: agentTrace.steps,
+        maxSteps: agentTrace.max_steps,
+      });
 
-    const promptStart = performance.now();
-    const contextBlock =
-      relevantChunks.length > 0
-        ? relevantChunks
+      const promptStart = performance.now();
+      const contextBlock =
+        relevantChunks.length > 0
+          ? relevantChunks
             .map(
               (c, index: number) =>
                 `### Document Context [Chunk ${index + 1} | ID: ${c.id}]\n${c.content}`
             )
             .join('\n\n')
-        : 'NO_CONTEXT_FOUND';
+          : 'NO_CONTEXT_FOUND';
 
-    const systemPrompt = getSystemPrompt(enterprise ? 'enterprise' : promptVariant, contextBlock);
-    const refusalText = enterprise ? ENTERPRISE_NO_EVIDENCE : NO_EVIDENCE;
-    // Previous enterprise answers may contain evidence whose grants have since expired.
-    const messages = enterprise ? [{ role: 'user' as const, content: userQuery }] : boundedHistory;
-    const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
-    telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
-    telemetry.retrieved_chunk_count = relevantChunks.length;
-    failure.retrieved_chunks_found = relevantChunks.length > 0;
+      const baseSystemPrompt = getSystemPrompt(enterprise ? 'enterprise' : promptVariant, contextBlock);
+      const systemPrompt = finalDecision.nextAction === 'clarify' && finalDecision.clarificationQuestion
+        ? `${baseSystemPrompt}\n\n### CLARIFICATION GUIDANCE:\nThe retrieved context is partial. State only what is confirmed in RETRIEVED CONTEXT using valid [Chunk <number>] citations, and ask this concise clarifying question: ${finalDecision.clarificationQuestion}`
+        : baseSystemPrompt;
+      const refusalText = enterprise ? ENTERPRISE_NO_EVIDENCE : NO_EVIDENCE;
+      // Previous enterprise answers may contain evidence whose grants have since expired.
+      const messages = enterprise ? [{ role: 'user' as const, content: userQuery }] : boundedHistory;
+      telemetry.retrieved_chunk_count = relevantChunks.length;
+      failure.retrieved_chunks_found = relevantChunks.length > 0;
 
-    let citations = relevantChunks.map((c, index: number) => ({
-      id: c.id,
-      index: index + 1,
-      content: c.content?.slice(0, 300) || '',
-      metadata: c.metadata || {},
-    }));
+      let citations = relevantChunks.map((c, index: number) => ({
+        id: c.id,
+        index: index + 1,
+        content: c.content?.slice(0, 300) || '',
+        metadata: c.metadata || {},
+      }));
 
-
-    let contextString = relevantChunks.map((c, i: number) => `[Chunk ${i + 1}]: ${c.content}`).join('\n\n');
-    const isEnterpriseRefusal = (value: string) => {
-      const trimmed = value.trim();
-      return isNoEvidenceAnswer(trimmed)
-        || /^I don't know(?:\s+based on the documents I can access)?\.?(?:\s*\[Chunk[^\]]*\])*\s*$/i.test(trimmed);
-    };
-    const prepareEnterpriseAnswer = async (text: string, finishReason: string, signal: AbortSignal) => {
-      if (!enterprise) return text;
-      if (!relevantChunks.length) {
-        failure.enterprise_rejection_reason = 'no_retrieved_chunks';
+      let contextString = relevantChunks.map((c, i: number) => `[Chunk ${i + 1}]: ${c.content}`).join('\n\n');
+      const isEnterpriseRefusal = (value: string) => {
+        const trimmed = value.trim();
+        return isNoEvidenceAnswer(trimmed)
+          || /^I don't know(?:\s+based on the documents I can access)?\.?(?:\s*\[Chunk[^\]]*\])*\s*$/i.test(trimmed);
+      };
+      const prepareEnterpriseAnswer = async (text: string, finishReason: string, signal: AbortSignal) => {
+        if (!enterprise) return text;
+        if (!relevantChunks.length) {
+          failure.enterprise_rejection_reason = 'no_retrieved_chunks';
+          citations = [];
+          contextString = '';
+          return ENTERPRISE_NO_EVIDENCE;
+        }
+        if (finishReason !== 'stop') {
+          failure.enterprise_rejection_reason = 'incomplete_finish_reason';
+          return text;
+        }
+        const refused = isEnterpriseRefusal(text);
+        const tooLong = text.length > MAX_ANSWER_CHARS;
+        const citationsValid = !refused && !tooLong && validCitations(text, citations);
+        failure.model_refusal = refused;
+        failure.answer_length_failed = !refused && tooLong;
+        failure.citation_validation_failed = !refused && !tooLong && !citationsValid;
+        if (!refused && !tooLong && citationsValid) {
+          const chunkIds = relevantChunks.map(chunk => chunk.id);
+          const visibility = organizationId
+            ? supabase.rpc('enterprise_chunks_still_visible', { target_organization_id: organizationId, chunk_ids: chunkIds })
+            : supabase.rpc('rag_chunks_still_visible', { target_project_id: projectId, chunk_ids: chunkIds });
+          const { data, error } = await withTimeout(Promise.resolve(
+            visibility.abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5000)])),
+          ), 5000, 'Evidence authorization');
+          signal.throwIfAborted();
+          if (error) throw new Error('Unable to verify evidence authorization.');
+          if (data === true) {
+            failure.enterprise_rejection_reason = 'none';
+            const cited = new Set(citationIndices(text));
+            citations = citations.filter(citation => cited.has(citation.index));
+            return text;
+          }
+          failure.visibility_recheck_failed = true;
+          failure.enterprise_rejection_reason = 'visibility_recheck_failed';
+        } else {
+          failure.enterprise_rejection_reason = refused
+            ? 'model_refusal'
+            : tooLong
+              ? 'answer_length_exceeded'
+              : 'invalid_citations';
+        }
         citations = [];
         contextString = '';
         return ENTERPRISE_NO_EVIDENCE;
-      }
-      if (finishReason !== 'stop') {
-        failure.enterprise_rejection_reason = 'incomplete_finish_reason';
-        return text;
-      }
-      const refused = isEnterpriseRefusal(text);
-      const tooLong = text.length > MAX_ANSWER_CHARS;
-      const citationsValid = !refused && !tooLong && validCitations(text, citations);
-      failure.model_refusal = refused;
-      failure.answer_length_failed = !refused && tooLong;
-      failure.citation_validation_failed = !refused && !tooLong && !citationsValid;
-      if (!refused && !tooLong && citationsValid) {
-        const chunkIds = relevantChunks.map(chunk => chunk.id);
-        const visibility = organizationId
-          ? supabase.rpc('enterprise_chunks_still_visible', { target_organization_id: organizationId, chunk_ids: chunkIds })
-          : supabase.rpc('rag_chunks_still_visible', { target_project_id: projectId, chunk_ids: chunkIds });
-        const { data, error } = await withTimeout(Promise.resolve(
-          visibility.abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5000)])),
-        ), 5000, 'Evidence authorization');
-        signal.throwIfAborted();
-        if (error) throw new Error('Unable to verify evidence authorization.');
-        if (data === true) {
-          failure.enterprise_rejection_reason = 'none';
-          const cited = new Set(citationIndices(text));
-          citations = citations.filter(citation => cited.has(citation.index));
-          return text;
+      };
+
+      const finalizeAnswer = async (text: string, finishReason: string, signal = req.signal) => {
+        stage = 'answer_validation';
+        if (!enterprise && relevantChunks.length > 0) {
+          failure.model_refusal = isNoEvidenceAnswer(text);
         }
-        failure.visibility_recheck_failed = true;
-        failure.enterprise_rejection_reason = 'visibility_recheck_failed';
-      } else {
-        failure.enterprise_rejection_reason = refused
-          ? 'model_refusal'
-          : tooLong
-            ? 'answer_length_exceeded'
-            : 'invalid_citations';
-      }
-      citations = [];
-      contextString = '';
-      return ENTERPRISE_NO_EVIDENCE;
+        try {
+          assertValidAnswer(text, citations, finishReason);
+        } catch (error) {
+          if (!enterprise) {
+            failure.answer_length_failed = finishReason === 'stop' && text.length > MAX_ANSWER_CHARS;
+            failure.citation_validation_failed = finishReason === 'stop'
+              && error instanceof Error
+              && error.message === 'Answer contains missing or invalid citations.';
+          }
+          recordFailure(stage, error, finishReason !== 'stop' ? 'generation_incomplete'
+            : !text.trim() ? 'answer_empty' : text.length > MAX_ANSWER_CHARS ? 'answer_too_long'
+              : error instanceof Error && error.message === 'Answer contains missing or invalid citations.'
+                ? 'invalid_citations' : 'unknown_error');
+          throw error;
+        }
+        telemetry.generation_ms = Math.round(performance.now() - generationStart);
+        telemetry.total_ms = Math.round(performance.now() - reqStart);
+        if (enterprise || !projectId) {
+          signal.throwIfAborted();
+          return;
+        }
+        const writeStart = performance.now();
+        stage = 'interaction_persistence';
+        const writeAbort = new AbortController();
+        let rejectCancellation!: (reason: unknown) => void;
+        const onAbort = () => {
+          writeAbort.abort(signal.reason);
+          rejectCancellation(signal.reason);
+        };
+        try {
+          signal.throwIfAborted();
+          const cancellation = new Promise<never>((_, reject) => { rejectCancellation = reject; });
+          signal.addEventListener('abort', onAbort, { once: true });
+          failure.interaction_write_started = true;
+          const { error } = await withTimeout(Promise.race([
+            Promise.resolve(createAdminClient(enterprise ? 'enterprise' : 'personal').from('interactions').insert({
+              id: interactionId, project_id: projectId.trim(), query_text: userQuery,
+              user_id: user.id,
+              retrieved_chunk_ids: relevantChunks.map((c) => c.id),
+              response_markdown: text, latency_ms: telemetry.total_ms,
+            }).abortSignal(writeAbort.signal).retry(false)),
+            cancellation,
+          ]), 5000, 'Interaction persistence');
+          signal.throwIfAborted();
+          if (error) throw new Error('Unable to save interaction.');
+        } catch (error) {
+          writeAbort.abort(error);
+          recordFailure(stage, error, signal.aborted ? 'request_cancelled' : 'interaction_write_failed');
+          throw error;
+        } finally {
+          signal.removeEventListener('abort', onAbort);
+          telemetry.interaction_write_ms = performance.now() - writeStart;
+        }
+      };
+
+      telemetry.context_chars = contextBlock.length;
+      telemetry.prompt_build_ms = performance.now() - promptStart;
+      const updateUsage = (u: LanguageModelUsage) => {
+        telemetry.token_usage = {
+          prompt: decisionTokens.prompt + (u.inputTokens ?? 0),
+          completion: decisionTokens.completion + (u.outputTokens ?? 0),
+          total: decisionTokens.total + (u.totalTokens ?? 0),
+        };
+        telemetry.tokens = { ...telemetry.token_usage };
+      };
+      const generationStart = performance.now();
+      const fallbackQuestionsFor = (text: string, signal: AbortSignal) =>
+        organizationId && text === ENTERPRISE_NO_EVIDENCE
+          ? getEnterpriseFallbackQuestions(supabase, organizationId, signal)
+          : [];
+      const shouldGenerateAnswer = relevantChunks.length > 0 && finalDecision.nextAction !== 'abstain';
+
+      return {
+        agentTrace,
+        finalDecision,
+        systemPrompt,
+        refusalText,
+        messages,
+        getCitations: () => citations,
+        getContextString: () => contextString,
+        prepareEnterpriseAnswer,
+        finalizeAnswer,
+        fallbackQuestionsFor,
+        shouldGenerateAnswer,
+        updateUsage,
+      };
     };
 
-    const finalizeAnswer = async (text: string, finishReason: string, signal = req.signal) => {
-      stage = 'answer_validation';
-      if (!enterprise && relevantChunks.length > 0) {
-        failure.model_refusal = isNoEvidenceAnswer(text);
-      }
-      try {
-        assertValidAnswer(text, citations, finishReason);
-      } catch (error) {
-        if (!enterprise) {
-          failure.answer_length_failed = finishReason === 'stop' && text.length > MAX_ANSWER_CHARS;
-          failure.citation_validation_failed = finishReason === 'stop'
-            && error instanceof Error
-            && error.message === 'Answer contains missing or invalid citations.';
-        }
-        recordFailure(stage, error, finishReason !== 'stop' ? 'generation_incomplete'
-          : !text.trim() ? 'answer_empty' : text.length > MAX_ANSWER_CHARS ? 'answer_too_long'
-          : error instanceof Error && error.message === 'Answer contains missing or invalid citations.'
-            ? 'invalid_citations' : 'unknown_error');
-        throw error;
-      }
-      telemetry.generation_ms = Math.round(performance.now() - generationStart);
-      telemetry.total_ms = Math.round(performance.now() - reqStart);
-      if (enterprise || !projectId) {
-        signal.throwIfAborted();
-        return;
-      }
-      const writeStart = performance.now();
-      stage = 'interaction_persistence';
-      const writeAbort = new AbortController();
-      let rejectCancellation!: (reason: unknown) => void;
-      const onAbort = () => {
-        writeAbort.abort(signal.reason);
-        rejectCancellation(signal.reason);
-      };
-      try {
-        signal.throwIfAborted();
-        const cancellation = new Promise<never>((_, reject) => { rejectCancellation = reject; });
-        signal.addEventListener('abort', onAbort, { once: true });
-        failure.interaction_write_started = true;
-        const { error } = await withTimeout(Promise.race([
-          Promise.resolve(createAdminClient(enterprise ? 'enterprise' : 'personal').from('interactions').insert({
-            id: interactionId, project_id: projectId.trim(), query_text: userQuery,
-            user_id: user.id,
-            retrieved_chunk_ids: relevantChunks.map((c) => c.id),
-            response_markdown: text, latency_ms: telemetry.total_ms,
-          }).abortSignal(writeAbort.signal).retry(false)),
-          cancellation,
-        ]), 5000, 'Interaction persistence');
-        signal.throwIfAborted();
-        if (error) throw new Error('Unable to save interaction.');
-      } catch (error) {
-        writeAbort.abort(error);
-        recordFailure(stage, error, signal.aborted ? 'request_cancelled' : 'interaction_write_failed');
-        throw error;
-      } finally {
-        signal.removeEventListener('abort', onAbort);
-        telemetry.interaction_write_ms = performance.now() - writeStart;
-      }
-    };
-    telemetry.context_chars = contextBlock.length;
-    telemetry.prompt_build_ms = performance.now() - promptStart;
-    const updateUsage = (u: LanguageModelUsage) => {
-      telemetry.token_usage = { prompt: u.inputTokens ?? 0, completion: u.outputTokens ?? 0, total: u.totalTokens ?? 0 };
-      telemetry.tokens = { ...telemetry.token_usage };
-    };
     const headers = {
       'Cache-Control': 'no-store',
       ...(!enterprise ? { 'x-interaction-id': interactionId } : {}),
-      'x-rag-embedding-ms': String(telemetry.embedding_ms),
-      'x-rag-retrieval-ms': String(telemetry.retrieval_ms),
     };
-    const generationStart = performance.now();
-    const fallbackQuestionsFor = (text: string, signal: AbortSignal) =>
-      organizationId && text === ENTERPRISE_NO_EVIDENCE
-        ? getEnterpriseFallbackQuestions(supabase, organizationId, signal)
-        : [];
+
     if (isEvalMode) {
-      let text = refusalText;
+      const rag = await runRagOrchestration(req.signal);
+      let text = rag.refusalText;
       let finishReason = 'stop';
-      if (relevantChunks.length) {
-        const result = await generateText({
-          model: google(generationModelId), system: systemPrompt, messages,
-          maxOutputTokens: 1000, maxRetries: 0, abortSignal: AbortSignal.any([req.signal, AbortSignal.timeout(35000)]),
-        });
+      if (rag.shouldGenerateAnswer) {
+        const { result } = await withTransientGeminiRetry(
+          (attemptSignal) =>
+            generateText({
+              model: google(generationModelId), system: rag.systemPrompt, messages: rag.messages,
+              maxOutputTokens: 1000, maxRetries: 0, abortSignal: attemptSignal,
+            }),
+          {
+            signal: req.signal, maxAttempts: 2, attemptTimeoutMs: 25000, totalTimeoutMs: 35000,
+            onRetry: () => { telemetry.retries.generation++; },
+          },
+        );
         text = result.text;
         finishReason = result.finishReason;
         failure.model_finish_reason = finishReason;
-        updateUsage(result.usage);
+        rag.updateUsage(result.usage);
       }
-      text = await prepareEnterpriseAnswer(text, finishReason, req.signal);
-      await finalizeAnswer(text, finishReason);
-      const fallbackQuestions = await fallbackQuestionsFor(text, req.signal);
+      text = await rag.prepareEnterpriseAnswer(text, finishReason, req.signal);
+      await rag.finalizeAnswer(text, finishReason);
+      rag.agentTrace.final_outcome = isNoEvidenceAnswer(text) ? 'abstain' : rag.finalDecision.nextAction;
+      const fallbackQuestions = await rag.fallbackQuestionsFor(text, req.signal);
       logTiming('success');
-      return Response.json({ text, output: text, context: contextString, citations,
+      const finalCitations = rag.getCitations();
+      return Response.json({
+        text, output: text, context: rag.getContextString(), citations: finalCitations,
         ...(fallbackQuestions.length ? { fallbackQuestions } : {}),
-        retrieved_chunks: citations.map(c => ({ id: c.id, index: c.index })),
-        ...(!enterprise ? { interactionId } : {}), metrics: telemetry }, { headers });
+        retrieved_chunks: finalCitations.map(c => ({ id: c.id, index: c.index })),
+        ...(!enterprise ? { interactionId } : {}), metrics: telemetry
+      }, {
+        headers: {
+          ...headers,
+          'x-rag-embedding-ms': String(telemetry.embedding_ms),
+          'x-rag-retrieval-ms': String(telemetry.retrieval_ms),
+        },
+      });
     }
 
     const streamAbort = new AbortController();
-    stage = 'stream_initialization';
     const stream = new ReadableStream<Uint8Array>({
       cancel() { cancelled = true; streamAbort.abort(); },
       async start(controller) {
@@ -555,12 +743,25 @@ export async function POST(req: Request) {
         };
         let succeeded = false;
         try {
-          if (!enterprise) send({ type: 'metadata', interactionId, citations });
+          send({
+            type: 'agent_step',
+            step: {
+              phase: 'tool_selected',
+              decisionMode,
+              tool: 'rag_retrieval',
+            },
+          });
+          const rag = await runRagOrchestration(
+            AbortSignal.any([req.signal, streamAbort.signal]),
+            (step) => send({ type: 'agent_step', step }),
+          );
+          stage = 'stream_initialization';
+          if (!enterprise) send({ type: 'metadata', interactionId, citations: rag.getCitations() });
           let text = '';
           let emittedLength = 0;
           let finishReason = 'stop';
-          if (!relevantChunks.length) {
-            text = refusalText;
+          if (!rag.shouldGenerateAnswer) {
+            text = rag.refusalText;
             telemetry.ttft_ms = Math.round(performance.now() - reqStart);
             if (!enterprise) {
               send({ type: 'text', text });
@@ -572,56 +773,90 @@ export async function POST(req: Request) {
             generationDeadline = AbortSignal.timeout(35000);
             generationSignal = AbortSignal.any([req.signal, streamAbort.signal, generationDeadline]);
             let modelStreamErrored = false;
-            const result = streamText({
-              model: google(generationModelId), system: systemPrompt, messages,
-              maxOutputTokens: 1000, maxRetries: 0,
-              abortSignal: generationSignal,
-              // The SDK filters error parts out of textStream; retain their origin without raw logging.
-              onError: ({ error }) => {
-                modelStreamErrored = true;
-                recordFailure('model_stream_iteration', error);
-              },
-            });
-            stage = 'model_stream_iteration';
-            for await (const delta of result.textStream) {
-              if (text.length + delta.length > MAX_ANSWER_CHARS) {
-                failure.answer_length_failed = true;
-                if (enterprise) failure.enterprise_rejection_reason = 'answer_length_exceeded';
-                recordFailure('answer_validation', undefined, 'answer_too_long');
-                streamAbort.abort();
-                throw new Error('Answer exceeds the length limit.');
-              }
-              if (!delta) continue;
-              if (!text) {
-                const firstText = performance.now();
-                telemetry.ttft_ms = Math.round(firstText - reqStart);
-                telemetry.model_first_text_ms = firstText - modelStart;
-              }
-              text += delta;
-              if (!enterprise) {
-                const publishable = safeCitationPrefix(text, citations);
-                if (publishable.length > emittedLength) {
-                  send({ type: 'text', text: publishable.slice(emittedLength) });
-                  emittedLength = publishable.length;
+            const maxStreamAttempts = 2; // Bounded pre-first-delta retry; never replay partial streamed output.
+            for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt++) {
+              let attemptSawError = false;
+              let attemptError: unknown = null;
+              let sawChunk = false;
+              stage = 'stream_initialization';
+              try {
+                const result = streamText({
+                  model: google(generationModelId), system: rag.systemPrompt, messages: rag.messages,
+                  maxOutputTokens: 1000, maxRetries: 0,
+                  abortSignal: generationSignal,
+                  // The SDK filters error parts out of textStream; retain their origin without raw logging.
+                  onError: ({ error }) => {
+                    attemptSawError = true;
+                    attemptError = error;
+                  },
+                });
+                stage = 'model_stream_iteration';
+                for await (const delta of result.textStream) {
+                  if (text.length + delta.length > MAX_ANSWER_CHARS) {
+                    failure.answer_length_failed = true;
+                    if (enterprise) failure.enterprise_rejection_reason = 'answer_length_exceeded';
+                    recordFailure('answer_validation', undefined, 'answer_too_long');
+                    streamAbort.abort();
+                    throw new Error('Answer exceeds the length limit.');
+                  }
+                  if (!delta) continue;
+                  sawChunk = true;
+                  if (!text) {
+                    const firstText = performance.now();
+                    telemetry.ttft_ms = Math.round(firstText - reqStart);
+                    telemetry.model_first_text_ms = firstText - modelStart;
+                  }
+                  text += delta;
+                  if (!enterprise) {
+                    const publishable = safeCitationPrefix(text, rag.getCitations());
+                    if (publishable.length > emittedLength) {
+                      send({ type: 'text', text: publishable.slice(emittedLength) });
+                      emittedLength = publishable.length;
+                    }
+                  }
                 }
+                if (attemptSawError && !text && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(attemptError)) {
+                  telemetry.retries.generation++;
+                  await sleep(getGeminiErrorStatus(attemptError) === 429 ? 2000 : 250, generationSignal);
+                  continue;
+                }
+                if (attemptSawError) {
+                  modelStreamErrored = true;
+                  recordFailure('model_stream_iteration', attemptError);
+                }
+                stage = 'model_stream_finalization';
+                rag.updateUsage(await result.usage);
+                finishReason = await result.finishReason;
+                failure.model_finish_reason = finishReason;
+                failure.model_stream_completed = !modelStreamErrored && !generationSignal.aborted;
+                break;
+              } catch (error) {
+                const retryErr = attemptError ?? error;
+                if (!sawChunk && !text && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(retryErr)) {
+                  telemetry.retries.generation++;
+                  await sleep(getGeminiErrorStatus(retryErr) === 429 ? 2000 : 250, generationSignal);
+                  continue;
+                }
+                if (attemptSawError && !generationSignal.aborted) {
+                  recordFailure('model_stream_iteration', attemptError);
+                }
+                throw error;
               }
             }
-            stage = 'model_stream_finalization';
-            updateUsage(await result.usage);
-            finishReason = await result.finishReason;
-            failure.model_finish_reason = finishReason;
-            failure.model_stream_completed = !modelStreamErrored && !generationSignal.aborted;
           }
           const signal = AbortSignal.any([req.signal, streamAbort.signal]);
-          text = await prepareEnterpriseAnswer(text, finishReason, signal);
-          await finalizeAnswer(text, finishReason, signal);
-          const fallbackQuestions = await fallbackQuestionsFor(text, signal);
-          if (enterprise) send({ type: 'metadata', citations });
+          text = await rag.prepareEnterpriseAnswer(text, finishReason, signal);
+          await rag.finalizeAnswer(text, finishReason, signal);
+          rag.agentTrace.final_outcome = isNoEvidenceAnswer(text) ? 'abstain' : rag.finalDecision.nextAction;
+          const fallbackQuestions = await rag.fallbackQuestionsFor(text, signal);
+          if (enterprise) send({ type: 'metadata', citations: rag.getCitations() });
           if (text.length > emittedLength) send({ type: 'text', text: text.slice(emittedLength) });
           if (!cancelled) telemetry.server_finish_ready_ms = performance.now() - reqStart;
-          send({ type: 'finish', metrics: telemetry,
+          send({
+            type: 'finish', metrics: telemetry,
             ...(fallbackQuestions.length ? { fallbackQuestions } : {}),
-            ...(req.headers.get('x-eval-mode') === 'true' ? { context: contextString } : {}) });
+            ...(req.headers.get('x-eval-mode') === 'true' ? { context: rag.getContextString() } : {})
+          });
           succeeded = true;
         } catch (error) {
           recordFailure(stage, error);

@@ -15,8 +15,32 @@ export interface StreamCitation {
   content: string
   metadata?: Record<string, unknown>
 }
+export type AgentStepPhase =
+  | "tool_selected"
+  | "retrieval_attempt_1_started"
+  | "retrieval_attempt_1_completed"
+  | "evidence_decision_1"
+  | "retrieval_attempt_2_started"
+  | "retrieval_attempt_2_completed"
+  | "evidence_decision_2"
+  | "final_decision"
+
+export interface AgentStepEventData {
+  phase: AgentStepPhase
+  decisionMode?: "llm" | "deterministic"
+  tool?: "deterministic_reply" | "jira_status" | "jira_status_clarification" | "jira_create_draft" | "rag_retrieval"
+  authorizedChunks?: number
+  mergedAuthorizedChunks?: number
+  decision?: "answer" | "retry_retrieval" | "clarify" | "abstain"
+  outcome?: "answer" | "retry_retrieval" | "clarify" | "abstain" | "tool_executed" | "confirmation_required"
+  steps?: number
+  maxSteps?: number
+}
+
 export type ChatEvent =
+  | { type: "agent_step"; step: AgentStepEventData }
   | { type: "metadata"; interactionId?: string; citations: StreamCitation[] }
+  | { type: "jira_draft"; draft: { summary: string; description: string } }
   | { type: "text"; text: string }
   | { type: "finish"; metrics: Record<string, unknown>; context?: string; fallbackQuestions?: string[] }
   | { type: "error"; message: string }

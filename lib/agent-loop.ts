@@ -1,4 +1,5 @@
 import { getDeterministicIntent, type DeterministicIntent } from "@/lib/chat-input"
+import type { AgentStepEventData } from "@/lib/chat-contract"
 import {
   draftJiraTicket,
   extractJiraStatusIssueKey,
@@ -23,13 +24,38 @@ export type AgentToolDecision =
   | { tool: "jira_status"; issueKey: string; requiresConfirmation: false }
   | { tool: "jira_status_clarification"; requiresConfirmation: false }
   | { tool: "jira_create_draft"; draft: JiraTicketDraft; requiresConfirmation: true }
-  | { tool: "rag_retrieval"; requiresConfirmation: false }
+  | { tool: "rag_retrieval"; searchQuery?: string; requiresConfirmation: false }
+
+export interface TokenCounts {
+  prompt: number
+  completion: number
+  total: number
+}
+
+export type EvidenceAction = "answer" | "retry_retrieval" | "clarify" | "abstain"
 
 export interface EvidenceEvaluation {
   sufficient: boolean
   reason: "no_chunks_retrieved" | "requested_policy_missing" | "zero_keyword_overlap" | "sufficient_evidence"
   matchedKeywords: number
   totalKeywords: number
+}
+
+export interface EvidenceDecision {
+  sufficient: boolean
+  reason: string
+  nextAction: EvidenceAction
+  reformulatedQuery: string | null
+  clarificationQuestion?: string | null
+  tokens?: TokenCounts
+  retries?: number
+}
+
+export interface AgentRetrievalStep {
+  attempt: number
+  authorized_chunks: number
+  decision: EvidenceAction
+  merged_authorized_chunks?: number
 }
 
 export interface AgentTrace {
@@ -40,7 +66,13 @@ export interface AgentTrace {
   max_retrieval_attempts: number
   reformulated: boolean
   evidence_sufficient: boolean
-  evidence_reason: EvidenceEvaluation["reason"] | "deterministic_short_circuit" | "tool_executed"
+  evidence_reason: string
+  decision_mode?: "llm" | "deterministic"
+  next_action?: EvidenceAction | "tool_executed" | "confirmation_required"
+  final_outcome?: EvidenceAction | "tool_executed" | "confirmation_required"
+  clarification_question?: string | null
+  decision_tokens?: TokenCounts
+  retrieval_steps?: AgentRetrievalStep[]
 }
 
 const STOPWORDS = new Set([
@@ -190,6 +222,57 @@ export function mergeUniqueChunks(primary: RagChunk[], secondary: RagChunk[], li
   return merged
 }
 
+function addTokens(acc: TokenCounts, next?: TokenCounts) {
+  if (!next) return
+  acc.prompt += next.prompt
+  acc.completion += next.completion
+  acc.total += next.total
+}
+
+function normalizeQueryText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+function clampEvidenceDecision(
+  raw: EvidenceDecision,
+  chunksCount: number,
+  canRetry: boolean,
+  previousQueries: string[],
+): EvidenceDecision {
+  const seen = new Set(previousQueries.map(normalizeQueryText))
+  const candidateReformulation = raw.reformulatedQuery?.trim().slice(0, 400) || null
+  const isDistinctReformulation = Boolean(candidateReformulation && !seen.has(normalizeQueryText(candidateReformulation)))
+
+  if (raw.nextAction === "retry_retrieval") {
+    if (canRetry && isDistinctReformulation) {
+      return { ...raw, sufficient: false, reformulatedQuery: candidateReformulation }
+    }
+    return {
+      sufficient: false,
+      reason: chunksCount === 0 ? "no_chunks_retrieved" : raw.reason || "insufficient_after_retries",
+      nextAction: "abstain",
+      reformulatedQuery: null,
+      clarificationQuestion: null,
+    }
+  }
+  if (chunksCount === 0) {
+    return {
+      sufficient: false,
+      reason: raw.reason || "no_chunks_retrieved",
+      nextAction: "abstain",
+      reformulatedQuery: null,
+      clarificationQuestion: null,
+    }
+  }
+  return {
+    sufficient: raw.nextAction === "answer" ? true : raw.sufficient,
+    reason: raw.reason || (raw.nextAction === "answer" ? "sufficient_evidence" : "insufficient_evidence"),
+    nextAction: raw.nextAction,
+    reformulatedQuery: null,
+    clarificationQuestion: raw.nextAction === "clarify" ? raw.clarificationQuestion?.trim() || null : null,
+  }
+}
+
 /**
  * Bounded single-agent retrieval loop:
  * Step 1 tool select -> Step 2 retrieve (1) -> Step 3 evaluate ->
@@ -197,13 +280,26 @@ export function mergeUniqueChunks(primary: RagChunk[], secondary: RagChunk[], li
  */
 export async function runBoundedRetrievalLoop(params: {
   userQuery: string
+  initialQuery?: string
+  initialSteps?: number
   retrieveForQuery: (queryText: string) => Promise<RagChunk[]>
+  decideAfterRetrieval?: (ctx: {
+    userQuery: string
+    chunks: RagChunk[]
+    attempt: number
+    canRetry: boolean
+    previousQueries: string[]
+  }) => Promise<EvidenceDecision>
+  onStep?: (step: AgentStepEventData) => void
   maxAttempts?: number
   maxSteps?: number
-}): Promise<{ chunks: RagChunk[]; agent: AgentTrace }> {
+}): Promise<{ chunks: RagChunk[]; agent: AgentTrace; finalDecision: EvidenceDecision }> {
   const maxAttempts = Math.min(params.maxAttempts ?? MAX_RETRIEVAL_ATTEMPTS, MAX_RETRIEVAL_ATTEMPTS)
   const maxSteps = Math.min(params.maxSteps ?? MAX_AGENT_STEPS, MAX_AGENT_STEPS)
-  let steps = 0
+  let steps = params.initialSteps ?? 0
+  if (steps > maxSteps) {
+    throw new Error(`Agent step limit exceeded (maxSteps=${maxSteps}).`)
+  }
   const advanceStep = () => {
     steps++
     if (steps > maxSteps) {
@@ -211,30 +307,94 @@ export async function runBoundedRetrievalLoop(params: {
     }
   }
 
-  advanceStep() // Step 1: tool selected (rag_retrieval)
-  advanceStep() // Step 2: retrieval attempt 1
-  let retrievalAttempts = 1
-  let chunks = await params.retrieveForQuery(params.userQuery)
-
-  advanceStep() // Step 3: evaluate retrieved evidence
-  let evaluation = evaluateRetrievedEvidence(params.userQuery, chunks)
-  let reformulated = false
-
-  if (!evaluation.sufficient && retrievalAttempts < maxAttempts) {
-    const rewrittenQuery = reformulateRetrievalQuery(params.userQuery)
-    if (rewrittenQuery) {
-      reformulated = true
-      advanceStep() // Step 4: reformulate + retrieval attempt 2
-      retrievalAttempts++
-      const secondChunks = await params.retrieveForQuery(rewrittenQuery)
-      chunks = mergeUniqueChunks(secondChunks, chunks, 8)
-      advanceStep() // Step 5: re-evaluate merged evidence
-      evaluation = evaluateRetrievedEvidence(params.userQuery, chunks)
+  const decisionTokens: TokenCounts = { prompt: 0, completion: 0, total: 0 }
+  const usingLlmEvaluator = Boolean(params.decideAfterRetrieval)
+  const evaluateStep = async (chunks: RagChunk[], attempt: number, previousQueries: string[]): Promise<EvidenceDecision> => {
+    const canRetry = attempt < maxAttempts
+    if (params.decideAfterRetrieval) {
+      const decision = await params.decideAfterRetrieval({
+        userQuery: params.userQuery,
+        chunks,
+        attempt,
+        canRetry,
+        previousQueries,
+      })
+      addTokens(decisionTokens, decision.tokens)
+      return clampEvidenceDecision(decision, chunks.length, canRetry, previousQueries)
+    }
+    const heuristic = evaluateRetrievedEvidence(params.userQuery, chunks)
+    const rewrite = !heuristic.sufficient && canRetry ? reformulateRetrievalQuery(params.userQuery) : null
+    if (!heuristic.sufficient && rewrite) {
+      return { sufficient: false, reason: heuristic.reason, nextAction: "retry_retrieval", reformulatedQuery: rewrite }
+    }
+    return {
+      sufficient: heuristic.sufficient,
+      reason: heuristic.reason,
+      nextAction: heuristic.sufficient ? "answer" : "abstain",
+      reformulatedQuery: null,
     }
   }
 
+  if (steps === 0) {
+    advanceStep() // Step 1: tool selected (rag_retrieval)
+  }
+  const firstQuery = params.initialQuery?.trim().slice(0, 400) || params.userQuery
+  const previousQueries = [firstQuery]
+
+  const decisionMode: "llm" | "deterministic" = usingLlmEvaluator ? "llm" : "deterministic"
+
+  advanceStep() // Step 2: retrieval attempt 1
+  params.onStep?.({ phase: "retrieval_attempt_1_started" })
+  let retrievalAttempts = 1
+  let chunks = await params.retrieveForQuery(firstQuery)
+  params.onStep?.({ phase: "retrieval_attempt_1_completed", authorizedChunks: chunks.length })
+
+  advanceStep() // Step 3: evaluate retrieved evidence
+  let decision = await evaluateStep(chunks, retrievalAttempts, previousQueries)
+  params.onStep?.({ phase: "evidence_decision_1", decisionMode, decision: decision.nextAction })
+  const retrievalSteps: AgentRetrievalStep[] = [
+    {
+      attempt: 1,
+      authorized_chunks: chunks.length,
+      decision: decision.nextAction,
+    },
+  ]
+  let reformulated = false
+
+  if (
+    decision.nextAction === "retry_retrieval"
+    && decision.reformulatedQuery
+    && retrievalAttempts < maxAttempts
+    && steps + 2 < maxSteps
+  ) {
+    reformulated = true
+    previousQueries.push(decision.reformulatedQuery)
+    advanceStep() // Step 4: retrieval attempt 2 with reformulated query
+    params.onStep?.({ phase: "retrieval_attempt_2_started" })
+    retrievalAttempts++
+    const secondChunks = await params.retrieveForQuery(decision.reformulatedQuery)
+    chunks = mergeUniqueChunks(secondChunks, chunks, 8)
+    params.onStep?.({
+      phase: "retrieval_attempt_2_completed",
+      authorizedChunks: secondChunks.length,
+      mergedAuthorizedChunks: chunks.length,
+    })
+    advanceStep() // Step 5: re-evaluate merged evidence
+    decision = await evaluateStep(chunks, retrievalAttempts, previousQueries)
+    params.onStep?.({ phase: "evidence_decision_2", decisionMode, decision: decision.nextAction })
+    retrievalSteps.push({
+      attempt: 2,
+      authorized_chunks: secondChunks.length,
+      merged_authorized_chunks: chunks.length,
+      decision: decision.nextAction,
+    })
+  }
+
+  decision = clampEvidenceDecision(decision, chunks.length, false, previousQueries)
+
   return {
     chunks,
+    finalDecision: decision,
     agent: {
       tool: "rag_retrieval",
       steps,
@@ -242,8 +402,13 @@ export async function runBoundedRetrievalLoop(params: {
       retrieval_attempts: retrievalAttempts,
       max_retrieval_attempts: maxAttempts,
       reformulated,
-      evidence_sufficient: evaluation.sufficient,
-      evidence_reason: evaluation.reason,
+      evidence_sufficient: decision.sufficient,
+      evidence_reason: decision.reason,
+      decision_mode: usingLlmEvaluator ? "llm" : "deterministic",
+      next_action: decision.nextAction,
+      clarification_question: decision.clarificationQuestion ?? null,
+      decision_tokens: decisionTokens,
+      retrieval_steps: retrievalSteps,
     },
   }
 }
