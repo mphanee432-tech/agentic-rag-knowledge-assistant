@@ -200,7 +200,7 @@ export async function POST(req: Request) {
     const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
     telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
     const resolvedLastTicketKey = extractLatestJiraTicketKeyFromMessages(boundedHistory) ?? lastJiraTicketKey;
-    const exactDeterministicIntent = getDeterministicIntent(userQuery);
+    const exactDeterministicIntent = getDeterministicIntent(userQuery, enterprise);
     const decisionTokens: TokenCounts = { prompt: 0, completion: 0, total: 0 };
     const addDecisionTokens = (next?: TokenCounts) => {
       if (!next) return;
@@ -326,7 +326,8 @@ export async function POST(req: Request) {
 
     if (toolDecision.tool === 'deterministic_reply') {
       const deterministicIntent = toolDecision.intent;
-      const jiraEnabled = deterministicIntent === 'greeting'
+      const needsDocumentClarification = deterministicIntent === 'sensitive_document_clarification';
+      const jiraEnabled = deterministicIntent === 'greeting' || needsDocumentClarification
         ? false
         : await getJiraAccess();
       const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
@@ -337,10 +338,11 @@ export async function POST(req: Request) {
         retrieval_attempts: 0,
         max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
         reformulated: false,
-        evidence_sufficient: true,
-        evidence_reason: 'deterministic_short_circuit',
+        evidence_sufficient: !needsDocumentClarification,
+        evidence_reason: needsDocumentClarification ? 'missing_document_identifier' : 'deterministic_short_circuit',
         decision_mode: decisionMode,
-        next_action: 'tool_executed',
+        next_action: needsDocumentClarification ? 'clarify' : 'tool_executed',
+        final_outcome: needsDocumentClarification ? 'clarify' : 'tool_executed',
         decision_tokens: decisionTokens,
       });
     }
