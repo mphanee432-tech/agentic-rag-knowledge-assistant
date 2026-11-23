@@ -8,6 +8,15 @@ const GENERIC_HR_POLICY = {
   content: "Employee Handbook: confidential HR files require HR approval and are handled under restricted access procedures. This handbook does not reproduce confidential HR documents.",
   metadata: {},
 }
+function setupEnv(t: test.TestContext) {
+  const old = process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  process.env.GOOGLE_GENERATIVE_AI_API_KEY = "test-only-fake-gemini-key"
+  t.after(() => {
+    if (old === undefined) delete process.env.GOOGLE_GENERATIVE_AI_API_KEY
+    else process.env.GOOGLE_GENERATIVE_AI_API_KEY = old
+  })
+}
+
 const HR_ACCESS_RULE = {
   id: "hr-access-policy",
   content: "D01 Employee Handbook: Confidential HR files are classified restricted. Employees request access through the HR Manager; access requires an explicit approval.",
@@ -28,6 +37,7 @@ function fakeDecision(
 }
 
 test("Enterprise restricted-content evaluator distinguishes generic access rules from document contents", async t => {
+  setupEnv(t)
   const decisions = [
     fakeDecision("retry_retrieval", "HR confidential restricted document contents"),
     fakeDecision("abstain"),
@@ -85,6 +95,7 @@ test("Enterprise restricted-content evaluator distinguishes generic access rules
 })
 
 test("Enterprise evaluator can still answer an authorized question ABOUT HR access rules", async t => {
+  setupEnv(t)
   let decisionCalls = 0
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
@@ -123,6 +134,7 @@ test("Enterprise evaluator can still answer an authorized question ABOUT HR acce
 })
 
 test("Enterprise evaluator does not apply Enterprise-specific rules to Personal RAG", async t => {
+  setupEnv(t)
   t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input))
     assert.equal(url.hostname, "generativelanguage.googleapis.com")
