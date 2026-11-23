@@ -19,13 +19,13 @@ export const AMBIGUOUS_CONFIDENTIAL_HR_CLARIFICATION =
  * through normal user-scoped RAG and PostgreSQL RLS.
  */
 export function isAmbiguousConfidentialHrDocumentRequest(query: string): boolean {
-  const q = query.toLowerCase().replace(/\\s+/g, " ").trim()
-  if (!/\\b(?:confidential|restricted|private|sensitive)\\b/.test(q)) return false
-  if (!/\\b(?:hr|human resources)\\b/.test(q)) return false
-  if (!/\\b(?:documents?|files?|records?)\\b/.test(q)) return false
-  if (/\\bd\\d{2}\\b/i.test(q) || /\\b(?:compensation|payroll|recruitment|onboarding|leave|attendance|benefits|employee handbook)\\b/.test(q)) return false
-  if (/\\b(?:access|permission|authorization|authorisation|approval|approved|classification|classified|rules|procedure|request|handling|how to|who can)\\b/.test(q)) return false
-  return /\\b(?:tell me about|explain(?: to me)?(?: about)?|describe|summari[sz]e|overview of|what(?:'s| is) in)\\b/.test(q)
+  const q = query.toLowerCase().replace(/\s+/g, " ").trim()
+  if (!/\b(?:confidential|restricted|private|sensitive)\b/.test(q)) return false
+  if (!/\b(?:hr|human resources)\b/.test(q)) return false
+  if (!/\b(?:documents?|files?|records?)\b/.test(q)) return false
+  if (/\bd\d{2}\b/i.test(q) || /\b(?:compensation|payroll|recruitment|onboarding|leave|attendance|benefits|employee handbook)\b/.test(q)) return false
+  if (/\b(?:access|permission|authorization|authorisation|approval|approved|classification|classified|rules|procedure|request|handling|how to|who can)\b/.test(q)) return false
+  return /\b(?:tell me about|explain(?: to me)?(?: about)?|describe|summari[sz]e|overview of|what(?:'s| is) in)\b/.test(q)
 }
 
 const STANDALONE_GREETING_PATTERN = /^\s*[!.?,;:\s]*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))[!.?,;:\s]*$/i
