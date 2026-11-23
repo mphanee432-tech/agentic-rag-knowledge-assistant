@@ -240,8 +240,8 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
                   parts: [{
                     text: JSON.stringify(
                       searchCalls === 1
-                        ? { sufficient: false, reason: "requested_policy_missing", nextAction: "retry_retrieval", reformulatedQuery: "D01 DOCUMENT CONTROL custodian", clarificationQuestion: null }
-                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "requested_policy_missing", nextAction: "retry_retrieval", reformulatedQuery: "D01 DOCUMENT CONTROL custodian", clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
                     ),
                   }],
                 },
@@ -313,7 +313,7 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
         }
         if (reqBody.generationConfig?.responseJsonSchema) {
           return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, reason: "no_chunks_retrieved", nextAction: "retry_retrieval", reformulatedQuery: "cafeteria lunch menu", clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "retry_retrieval", reformulatedQuery: "cafeteria lunch menu", clarificationQuestion: null }) }] }, finishReason: "STOP" }],
           })
         }
         geminiCalls++

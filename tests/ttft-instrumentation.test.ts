@@ -184,8 +184,8 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
                 parts: [{
                   text: JSON.stringify(
                     scenario.empty
-                      ? { sufficient: false, reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
-                      : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                      ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                      : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
                   ),
                 }],
               },
