@@ -79,7 +79,7 @@ test("Enterprise restricted-content evaluator distinguishes generic access rules
   assert.equal(result.agent.evidence_sufficient, false)
   assert.equal(result.agent.retrieval_attempts, MAX_RETRIEVAL_ATTEMPTS)
   assert.ok(result.agent.steps <= MAX_AGENT_STEPS)
-  assert.deepEqual(result.agent.retrieval_steps.map(step => step.decision), [
+  assert.deepEqual(result.agent.retrieval_steps?.map(step => step.decision), [
     "retry_retrieval", "abstain",
   ])
 })
