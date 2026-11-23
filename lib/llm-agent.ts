@@ -263,6 +263,14 @@ export async function evaluateEvidenceWithLlm(params: {
     "Decide accurately:",
     "- Set nextAction='answer' (and sufficient=true) if the chunks contain enough facts to answer the question OR explicitly state that the requested rule/quota/threshold is not established.",
     "- Set nextAction='clarify' (sufficient=false) ONLY if chunks contain relevant partial or conditional context (for example, architectural or sizing options that depend on unstated user scale or use case) and asking the user for missing details or scope would help answer accurately with citations.",
+    params.isEnterprise
+      ? "- For requests to describe or summarize the CONTENTS of confidential, restricted, or otherwise specific documents, require directly responsive authorized passages from the requested document or subject. Generic classification rules, access procedures, document catalog mentions, or HR-related references do NOT establish those documents' contents. Do not mark such evidence sufficient or select 'answer' just because the topic keywords overlap."
+      : "- For requests about a specific document, require passages that directly address its contents; topical keyword overlap alone is not sufficient evidence.",
+    params.isEnterprise
+      ? "- Distinguish document CONTENT questions from questions ABOUT access rules. If the user explicitly asks how confidential HR documents are classified, requested, approved, or accessed, authorized policy passages describing those rules CAN be sufficient; answer only the rules actually documented. Do not infer that missing/restricted documents exist, are accessible, or contain any specific information."
+      : "- A document's general subject is not proof of a requested fact; cite directly responsive evidence.",
+    "- Explicit documented non-applicability can support a grounded negative answer, but silence, omission, or generic access rules cannot prove a document's contents or absence.",
+    "- If evidence is merely generic for a document-content question, retry ONLY when a distinct targeted search could realistically find authorized source-specific evidence; otherwise abstain. After the final attempt, abstain if no directly responsive evidence exists.",
     params.canRetry
       ? "- Set nextAction='retry_retrieval' (sufficient=false) if the current chunks miss the answer (or none were retrieved) and a distinct, targeted 3-6 keyword reformulatedQuery (omitting meta-words like 'blueprint', 'document', 'system') could retrieve better chunks. reformulatedQuery MUST differ substantially from previousQueries (add synonyms, policy codes, or broader/more exact keywords)."
       : "- Retries are exhausted: do NOT choose retry_retrieval. Choose 'answer' if sufficient, 'clarify' ONLY if relevant chunks support a partial cited clarification, or 'abstain' otherwise.",

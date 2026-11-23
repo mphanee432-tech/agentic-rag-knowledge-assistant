@@ -9,6 +9,25 @@ export const CAPABILITY_RESPONSE_WITH_JIRA =
 export const CAPABILITY_RESPONSE_WITHOUT_JIRA =
   "I can answer questions and summarize company documents you have permission to access, and provide source citations. I won't disclose documents you're not authorized to view."
 
+export const AMBIGUOUS_CONFIDENTIAL_HR_CLARIFICATION =
+  "Which specific confidential HR document or policy ID do you mean? I can explain only information in documents you are authorized to access."
+
+/**
+ * Ask for a document identity before searching for the CONTENTS of an unnamed
+ * confidential HR document. This is a narrow ambiguity guard, not an access
+ * decision: named documents and questions about access rules must still go
+ * through normal user-scoped RAG and PostgreSQL RLS.
+ */
+export function isAmbiguousConfidentialHrDocumentRequest(query: string): boolean {
+  const q = query.toLowerCase().replace(/\s+/g, " ").trim()
+  if (!/\b(?:confidential|restricted|private|sensitive)\b/.test(q)) return false
+  if (!/\b(?:hr|human resources)\b/.test(q)) return false
+  if (!/\b(?:documents?|files?|records?)\b/.test(q)) return false
+  if (/\bd\d{2}\b/i.test(q) || /\b(?:compensation|payroll|recruitment|onboarding|leave|attendance|benefits|employee handbook)\b/.test(q)) return false
+  if (/\b(?:access|permission|authorization|authorisation|approval|approved|classification|classified|rules|procedure|request|handling|how to|who can)\b/.test(q)) return false
+  return /\b(?:tell me about|explain(?: to me)?(?: about)?|describe|summari[sz]e|overview of|what(?:'s| is) in)\b/.test(q)
+}
+
 const STANDALONE_GREETING_PATTERN = /^\s*[!.?,;:\s]*(?:hi|hello|hey|good\s+(?:morning|afternoon|evening))[!.?,;:\s]*$/i
 const STANDALONE_IDENTITY_PATTERN = /^\s*[!.?,;:\s]*(?:who|what)\s+are\s+you[!.?,;:\s]*$/i
 const STANDALONE_CAPABILITY_PATTERN = /^\s*[!.?,;:\s]*(?:what\s+can\s+you\s+do|how\s+can\s+you\s+help\s+me)[!.?,;:\s]*$/i
@@ -25,9 +44,10 @@ export function isStandaloneCapabilityQuestion(query: string): boolean {
   return STANDALONE_CAPABILITY_PATTERN.test(query)
 }
 
-export type DeterministicIntent = "greeting" | "identity" | "capability"
+export type DeterministicIntent = "greeting" | "identity" | "capability" | "sensitive_document_clarification"
 
-export function getDeterministicIntent(query: string): DeterministicIntent | null {
+export function getDeterministicIntent(query: string, isEnterprise = false): DeterministicIntent | null {
+  if (isEnterprise && isAmbiguousConfidentialHrDocumentRequest(query)) return "sensitive_document_clarification"
   if (STANDALONE_GREETING_PATTERN.test(query)) return "greeting"
   if (STANDALONE_IDENTITY_PATTERN.test(query)) return "identity"
   if (STANDALONE_CAPABILITY_PATTERN.test(query)) return "capability"
@@ -38,6 +58,8 @@ export function getDeterministicResponse(intent: DeterministicIntent, canCreateJ
   switch (intent) {
     case "greeting":
       return GREETING_RESPONSE
+    case "sensitive_document_clarification":
+      return AMBIGUOUS_CONFIDENTIAL_HR_CLARIFICATION
     case "identity":
       return canCreateJira ? IDENTITY_RESPONSE_WITH_JIRA : IDENTITY_RESPONSE_WITHOUT_JIRA
     case "capability":
