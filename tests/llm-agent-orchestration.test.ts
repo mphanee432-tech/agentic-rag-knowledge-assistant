@@ -96,7 +96,7 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
         }
         if (body.generationConfig?.responseJsonSchema) {
           return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, reason: "direct_answer_present", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "direct_answer_present", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
             usageMetadata: { promptTokenCount: 80, candidatesTokenCount: 20, totalTokenCount: 100 },
           })
         }
@@ -165,8 +165,8 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
                 parts: [{
                   text: JSON.stringify(
                     queries.length === 1
-                      ? { sufficient: false, reason: "missing_backup_schedule", nextAction: "retry_retrieval", reformulatedQuery: "PostgreSQL backups recovery RPO frequency", clarificationQuestion: null }
-                      : { sufficient: true, reason: "backup_cadence_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                      ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "missing_backup_schedule", nextAction: "retry_retrieval", reformulatedQuery: "PostgreSQL backups recovery RPO frequency", clarificationQuestion: null }
+                      : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "backup_cadence_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
                   ),
                 }],
               },
@@ -220,7 +220,7 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
         }
         if (body.generationConfig?.responseJsonSchema) {
           return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
           })
         }
         answerGenCalls++
@@ -352,7 +352,7 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
         }
         if (body.generationConfig?.responseJsonSchema) {
           return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, reason: "injected_no_answer", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "injected_no_answer", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
           })
         }
       }
@@ -446,8 +446,8 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
                 role: "model",
                 parts: [{
                   text: JSON.stringify(isSecond
-                    ? { sufficient: true, reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }
-                    : { sufficient: false, reason: "missing_cadence", nextAction: "retry_retrieval", reformulatedQuery: "daily backups retention cadence", clarificationQuestion: null }),
+                    ? { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }
+                    : { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "missing_cadence", nextAction: "retry_retrieval", reformulatedQuery: "daily backups retention cadence", clarificationQuestion: null }),
                 }],
               },
               finishReason: "STOP",
@@ -573,7 +573,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
             candidates: [{
               content: {
                 role: "model",
-                parts: [{ text: JSON.stringify({ sufficient: true, reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
+                parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
               },
               finishReason: "STOP",
             }],
@@ -770,7 +770,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
             candidates: [{
               content: {
                 role: "model",
-                parts: [{ text: JSON.stringify({ sufficient: true, reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
+                parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
               },
               finishReason: "STOP",
             }],
@@ -837,7 +837,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
             candidates: [{
               content: {
                 role: "model",
-                parts: [{ text: JSON.stringify({ sufficient: true, reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
+                parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "answer_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }],
               },
               finishReason: "STOP",
             }],
@@ -903,7 +903,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
         }
         if (body.generationConfig?.responseJsonSchema) {
           return Response.json({
-            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, reason: "threshold_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "threshold_found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
           })
         }
         return Response.json({
@@ -966,7 +966,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
             candidates: [{
               content: {
                 role: "model",
-                parts: [{ text: JSON.stringify({ sufficient: false, reason: "depends_on_scale", nextAction: "clarify", reformulatedQuery: null, clarificationQuestion: "Are you targeting a prototype or early production workload?" }) }],
+                parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "partial", supportingChunkIndices: [1], reason: "depends_on_scale", nextAction: "clarify", reformulatedQuery: null, clarificationQuestion: "Are you targeting a prototype or early production workload?" }) }],
               },
               finishReason: "STOP",
             }],

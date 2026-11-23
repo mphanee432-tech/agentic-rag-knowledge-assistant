@@ -70,8 +70,8 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
                   parts: [{
                     text: JSON.stringify(
                       rpcCalls === 1
-                        ? { sufficient: false, reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Kafka Kubernetes fewer than 10000 chunks", clarificationQuestion: null }
-                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Kafka Kubernetes fewer than 10000 chunks", clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
                     ),
                   }],
                 },
@@ -177,8 +177,8 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
                   parts: [{
                     text: JSON.stringify(
                       rpcCalls === 1
-                        ? { sufficient: false, reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Bluebird Bookshelf Book Exchange borrow limit", clarificationQuestion: null }
-                        : { sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "zero_keyword_overlap", nextAction: "retry_retrieval", reformulatedQuery: "Bluebird Bookshelf Book Exchange borrow limit", clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
                     ),
                   }],
                 },
@@ -275,8 +275,8 @@ test("Controlled Recovery & Safety: Personal and Enterprise first-miss -> second
                   parts: [{
                     text: JSON.stringify(
                       personalRpcCalls === 1
-                        ? { sufficient: false, reason: "insufficient_evidence", nextAction: "retry_retrieval", reformulatedQuery: "quantum limit threshold", clarificationQuestion: null }
-                        : { sufficient: false, reason: "insufficient_after_retries", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null },
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "insufficient_evidence", nextAction: "retry_retrieval", reformulatedQuery: "quantum limit threshold", clarificationQuestion: null }
+                        : { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "insufficient_after_retries", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null },
                     ),
                   }],
                 },

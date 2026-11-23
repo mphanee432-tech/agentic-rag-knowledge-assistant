@@ -121,7 +121,7 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
             if (reqBody.generationConfig?.responseJsonSchema) {
               return Response.json({
                 candidates: [{
-                  content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] },
+                  content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] },
                   finishReason: "STOP",
                 }],
               })
@@ -183,7 +183,7 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
           }
           if (reqBody.generationConfig?.responseJsonSchema) {
             return Response.json({
-              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, reason: "evaluate_answer", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "evaluate_answer", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
             })
           }
           return Response.json({
@@ -234,7 +234,7 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
           }
           if (reqBody.generationConfig?.responseJsonSchema) {
             return Response.json({
-              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
             })
           }
         }

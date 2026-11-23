@@ -15,8 +15,10 @@ import {
   MAX_AGENT_STEPS,
   MAX_RETRIEVAL_ATTEMPTS,
   runBoundedRetrievalLoop,
+  type AbstentionReason,
   type AgentToolDecision,
   type AgentTrace,
+  type EvidenceQuality,
   type TokenCounts,
 } from '@/lib/agent-loop';
 import { evaluateEvidenceWithLlm, selectAgentToolWithLlm } from '@/lib/llm-agent';
@@ -40,7 +42,7 @@ type FailureStage = 'agent_decision' | 'stream_initialization' | 'model_stream_i
 type FailureCategory = 'provider_timeout' | 'provider_error' | 'stream_interrupted' | 'generation_incomplete'
   | 'answer_empty' | 'answer_too_long' | 'invalid_citations' | 'interaction_write_failed'
   | 'request_cancelled' | 'unknown_error';
-type EnterpriseRejectionReason = 'none' | 'no_retrieved_chunks' | 'incomplete_finish_reason'
+type EnterpriseRejectionReason = 'none' | 'no_retrieved_chunks' | 'evaluator_abstained' | 'incomplete_finish_reason'
   | 'model_refusal' | 'answer_length_exceeded' | 'invalid_citations' | 'visibility_recheck_failed';
 
 function sanitizeProviderError(error: unknown): {
@@ -108,6 +110,10 @@ export async function POST(req: Request) {
     retrieved_chunks_found: null as boolean | null,
     model_finish_reason: null as string | null,
     model_refusal: false,
+    evaluator_generator_disagreement: false,
+    evidence_quality: null as EvidenceQuality | null,
+    supporting_chunk_count: null as number | null,
+    abstention_reason: null as AbstentionReason | null,
     citation_validation_failed: false,
     answer_length_failed: false,
     visibility_recheck_failed: false,
@@ -154,6 +160,8 @@ export async function POST(req: Request) {
     context_chars: null as number | null,
     embedding_ms: 0,
     retrieval_ms: 0,
+    tool_selection_ms: 0,
+    evidence_eval_ms: 0,
     agent_decision_ms: 0,
     ttft_ms: 0,
     generation_ms: 0,
@@ -244,6 +252,7 @@ export async function POST(req: Request) {
       toolSelectionMs = llmSelection.decisionMs;
       decisionMode = 'llm';
       addDecisionTokens(llmSelection.tokens);
+      telemetry.tool_selection_ms = Math.round(toolSelectionMs);
       telemetry.agent_decision_ms = Math.round(toolSelectionMs);
     }
 
@@ -492,7 +501,11 @@ export async function POST(req: Request) {
       });
       telemetry.embedding_ms = Math.round(totalEmbedMs);
       telemetry.retrieval_ms = Math.round(totalRetrievalMs);
+      telemetry.tool_selection_ms = Math.round(toolSelectionMs);
+      telemetry.evidence_eval_ms = Math.round(evalDecisionMs);
       telemetry.agent_decision_ms = Math.round(toolSelectionMs + evalDecisionMs);
+      failure.evidence_quality = agentTrace.evidence_quality ?? null;
+      failure.supporting_chunk_count = agentTrace.supporting_chunk_count ?? 0;
       addDecisionTokens(agentTrace.decision_tokens);
       agentTrace.steps = Math.min(agentTrace.steps + 1, MAX_AGENT_STEPS); // Final answer/refusal step
       agentTrace.decision_tokens = { ...decisionTokens };
@@ -516,14 +529,18 @@ export async function POST(req: Request) {
           : 'NO_CONTEXT_FOUND';
 
       const baseSystemPrompt = getSystemPrompt(enterprise ? 'enterprise' : promptVariant, contextBlock);
+      const supportingChunksHint = finalDecision.supportingChunkIndices && finalDecision.supportingChunkIndices.length > 0
+        ? ` Focus on the confirmed details in ${finalDecision.supportingChunkIndices.map((idx) => `[Chunk ${idx}]`).join(', ')} where directly applicable.`
+        : '';
       const systemPrompt = finalDecision.nextAction === 'clarify' && finalDecision.clarificationQuestion
-        ? `${baseSystemPrompt}\n\n### CLARIFICATION GUIDANCE:\nThe retrieved context is partial. State only what is confirmed in RETRIEVED CONTEXT using valid [Chunk <number>] citations, and ask this concise clarifying question: ${finalDecision.clarificationQuestion}`
+        ? `${baseSystemPrompt}\n\n### CLARIFICATION GUIDANCE:\nThe retrieved context is partial.${supportingChunksHint} State only what is confirmed in RETRIEVED CONTEXT using valid [Chunk <number>] citations, do not invent missing facts or speculate about unavailable documents, and ask this concise clarifying question: ${finalDecision.clarificationQuestion} If RETRIEVED CONTEXT does not actually substantiate any relevant facts for the clarifying context, reply with the exact refusal sentence instead.`
         : baseSystemPrompt;
       const refusalText = enterprise ? ENTERPRISE_NO_EVIDENCE : NO_EVIDENCE;
       // Previous enterprise answers may contain evidence whose grants have since expired.
       const messages = enterprise ? [{ role: 'user' as const, content: userQuery }] : boundedHistory;
       telemetry.retrieved_chunk_count = relevantChunks.length;
       failure.retrieved_chunks_found = relevantChunks.length > 0;
+      const shouldGenerateAnswer = relevantChunks.length > 0 && finalDecision.nextAction !== 'abstain';
 
       let citations = relevantChunks.map((c, index: number) => ({
         id: c.id,
@@ -538,10 +555,24 @@ export async function POST(req: Request) {
         return isNoEvidenceAnswer(trimmed)
           || /^I don't know(?:\s+based on the documents I can access)?\.?(?:\s*\[Chunk[^\]]*\])*\s*$/i.test(trimmed);
       };
+      const classifyEvaluatorAbstention = (): AbstentionReason => {
+        if (!relevantChunks.length) return 'no_chunks_retrieved';
+        if (finalDecision.clampedFrom === 'answer') return 'unsupported_evaluator_answer';
+        if (finalDecision.reason === 'no_new_evidence_on_retry') return 'no_new_evidence_on_retry';
+        if (finalDecision.evidenceQuality === 'topical_only') return 'topical_only_evidence';
+        return 'insufficient_evidence';
+      };
       const prepareEnterpriseAnswer = async (text: string, finishReason: string, signal: AbortSignal) => {
         if (!enterprise) return text;
         if (!relevantChunks.length) {
           failure.enterprise_rejection_reason = 'no_retrieved_chunks';
+          citations = [];
+          contextString = '';
+          return ENTERPRISE_NO_EVIDENCE;
+        }
+        if (!shouldGenerateAnswer) {
+          failure.model_refusal = false;
+          failure.enterprise_rejection_reason = 'evaluator_abstained';
           citations = [];
           contextString = '';
           return ENTERPRISE_NO_EVIDENCE;
@@ -586,9 +617,35 @@ export async function POST(req: Request) {
         return ENTERPRISE_NO_EVIDENCE;
       };
 
+      const recordFinalOutcome = (finalText: string) => {
+        const finalAbstained = isNoEvidenceAnswer(finalText);
+        const disagreement = shouldGenerateAnswer && finalAbstained;
+        let abstentionReason: AbstentionReason = 'none';
+        if (finalAbstained) {
+          if (!shouldGenerateAnswer) {
+            abstentionReason = classifyEvaluatorAbstention();
+          } else if (failure.model_refusal) {
+            abstentionReason = 'generator_refusal';
+          } else if (enterprise && failure.enterprise_rejection_reason === 'invalid_citations') {
+            abstentionReason = 'invalid_citations';
+          } else if (enterprise && failure.enterprise_rejection_reason === 'answer_length_exceeded') {
+            abstentionReason = 'answer_length_exceeded';
+          } else if (enterprise && failure.enterprise_rejection_reason === 'visibility_recheck_failed') {
+            abstentionReason = 'visibility_recheck_failed';
+          } else {
+            abstentionReason = 'generator_refusal';
+          }
+        }
+        failure.evaluator_generator_disagreement = disagreement;
+        failure.abstention_reason = abstentionReason;
+        agentTrace.final_outcome = finalAbstained ? 'abstain' : finalDecision.nextAction;
+        agentTrace.evaluator_generator_disagreement = disagreement;
+        agentTrace.abstention_reason = abstentionReason;
+      };
+
       const finalizeAnswer = async (text: string, finishReason: string, signal = req.signal) => {
         stage = 'answer_validation';
-        if (!enterprise && relevantChunks.length > 0) {
+        if (!enterprise && relevantChunks.length > 0 && shouldGenerateAnswer) {
           failure.model_refusal = isNoEvidenceAnswer(text);
         }
         try {
@@ -661,7 +718,6 @@ export async function POST(req: Request) {
         organizationId && text === ENTERPRISE_NO_EVIDENCE
           ? getEnterpriseFallbackQuestions(supabase, organizationId, signal)
           : [];
-      const shouldGenerateAnswer = relevantChunks.length > 0 && finalDecision.nextAction !== 'abstain';
 
       return {
         agentTrace,
@@ -673,6 +729,7 @@ export async function POST(req: Request) {
         getContextString: () => contextString,
         prepareEnterpriseAnswer,
         finalizeAnswer,
+        recordFinalOutcome,
         fallbackQuestionsFor,
         shouldGenerateAnswer,
         updateUsage,
@@ -707,7 +764,7 @@ export async function POST(req: Request) {
       }
       text = await rag.prepareEnterpriseAnswer(text, finishReason, req.signal);
       await rag.finalizeAnswer(text, finishReason);
-      rag.agentTrace.final_outcome = isNoEvidenceAnswer(text) ? 'abstain' : rag.finalDecision.nextAction;
+      rag.recordFinalOutcome(text);
       const fallbackQuestions = await rag.fallbackQuestionsFor(text, req.signal);
       logTiming('success');
       const finalCitations = rag.getCitations();
@@ -847,7 +904,7 @@ export async function POST(req: Request) {
           const signal = AbortSignal.any([req.signal, streamAbort.signal]);
           text = await rag.prepareEnterpriseAnswer(text, finishReason, signal);
           await rag.finalizeAnswer(text, finishReason, signal);
-          rag.agentTrace.final_outcome = isNoEvidenceAnswer(text) ? 'abstain' : rag.finalDecision.nextAction;
+          rag.recordFinalOutcome(text);
           const fallbackQuestions = await rag.fallbackQuestionsFor(text, signal);
           if (enterprise) send({ type: 'metadata', citations: rag.getCitations() });
           if (text.length > emittedLength) send({ type: 'text', text: text.slice(emittedLength) });

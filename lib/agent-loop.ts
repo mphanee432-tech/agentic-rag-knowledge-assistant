@@ -33,6 +33,18 @@ export interface TokenCounts {
 }
 
 export type EvidenceAction = "answer" | "retry_retrieval" | "clarify" | "abstain"
+export type EvidenceQuality = "sufficient" | "partial" | "topical_only" | "insufficient"
+export type AbstentionReason =
+  | "none"
+  | "no_chunks_retrieved"
+  | "insufficient_evidence"
+  | "topical_only_evidence"
+  | "unsupported_evaluator_answer"
+  | "no_new_evidence_on_retry"
+  | "generator_refusal"
+  | "invalid_citations"
+  | "answer_length_exceeded"
+  | "visibility_recheck_failed"
 
 export interface EvidenceEvaluation {
   sufficient: boolean
@@ -43,10 +55,13 @@ export interface EvidenceEvaluation {
 
 export interface EvidenceDecision {
   sufficient: boolean
+  evidenceQuality?: EvidenceQuality
+  supportingChunkIndices?: number[]
   reason: string
   nextAction: EvidenceAction
   reformulatedQuery: string | null
   clarificationQuestion?: string | null
+  clampedFrom?: EvidenceAction | null
   tokens?: TokenCounts
   retries?: number
 }
@@ -66,10 +81,17 @@ export interface AgentTrace {
   max_retrieval_attempts: number
   reformulated: boolean
   evidence_sufficient: boolean
+  evidence_quality?: EvidenceQuality
+  supporting_chunk_count?: number
+  supporting_chunk_indices?: number[]
   evidence_reason: string
   decision_mode?: "llm" | "deterministic"
+  evaluator_decision?: EvidenceAction
+  decision_clamped_from?: EvidenceAction | null
   next_action?: EvidenceAction | "tool_executed" | "confirmation_required"
   final_outcome?: EvidenceAction | "tool_executed" | "confirmation_required"
+  evaluator_generator_disagreement?: boolean
+  abstention_reason?: AbstentionReason
   clarification_question?: string | null
   decision_tokens?: TokenCounts
   retrieval_steps?: AgentRetrievalStep[]
@@ -233,7 +255,38 @@ function normalizeQueryText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim()
 }
 
-function clampEvidenceDecision(
+function normalizeEvidenceQuality(
+  raw: EvidenceDecision,
+  chunksCount: number,
+): EvidenceQuality {
+  if (
+    raw.evidenceQuality === "sufficient"
+    || raw.evidenceQuality === "partial"
+    || raw.evidenceQuality === "topical_only"
+    || raw.evidenceQuality === "insufficient"
+  ) {
+    return chunksCount === 0 ? "insufficient" : raw.evidenceQuality
+  }
+  if (chunksCount === 0) return "insufficient"
+  if (raw.nextAction === "clarify") return "partial"
+  return raw.sufficient ? "sufficient" : "insufficient"
+}
+
+function normalizeSupportingChunkIndices(
+  indices: number[] | undefined,
+  chunksCount: number,
+): number[] | undefined {
+  if (!Array.isArray(indices)) return undefined
+  const valid = new Set<number>()
+  for (const idx of indices) {
+    if (typeof idx === "number" && Number.isInteger(idx) && idx >= 1 && idx <= chunksCount) {
+      valid.add(idx)
+    }
+  }
+  return [...valid].sort((a, b) => a - b)
+}
+
+export function clampEvidenceDecision(
   raw: EvidenceDecision,
   chunksCount: number,
   canRetry: boolean,
@@ -242,34 +295,151 @@ function clampEvidenceDecision(
   const seen = new Set(previousQueries.map(normalizeQueryText))
   const candidateReformulation = raw.reformulatedQuery?.trim().slice(0, 400) || null
   const isDistinctReformulation = Boolean(candidateReformulation && !seen.has(normalizeQueryText(candidateReformulation)))
+  const candidateClarification = raw.clarificationQuestion?.trim().slice(0, 400) || null
+  const quality = normalizeEvidenceQuality(raw, chunksCount)
+  const validSupportingIndices = normalizeSupportingChunkIndices(raw.supportingChunkIndices, chunksCount)
+  const hasSupportingCheck = validSupportingIndices !== undefined
+  const hasSupportingEvidence = !hasSupportingCheck || validSupportingIndices.length > 0
+  const supportingIndicesOut = validSupportingIndices ?? []
 
   if (raw.nextAction === "retry_retrieval") {
     if (canRetry && isDistinctReformulation) {
-      return { ...raw, sufficient: false, reformulatedQuery: candidateReformulation }
+      return {
+        ...raw,
+        sufficient: false,
+        evidenceQuality: quality === "sufficient" ? "partial" : quality,
+        supportingChunkIndices: supportingIndicesOut,
+        reformulatedQuery: candidateReformulation,
+        clarificationQuestion: null,
+        clampedFrom: raw.clampedFrom ?? null,
+      }
     }
     return {
       sufficient: false,
+      evidenceQuality: chunksCount === 0 ? "insufficient" : (quality === "sufficient" ? "insufficient" : quality),
+      supportingChunkIndices: supportingIndicesOut,
       reason: chunksCount === 0 ? "no_chunks_retrieved" : raw.reason || "insufficient_after_retries",
       nextAction: "abstain",
       reformulatedQuery: null,
       clarificationQuestion: null,
+      clampedFrom: raw.clampedFrom ?? null,
     }
   }
+
   if (chunksCount === 0) {
     return {
       sufficient: false,
+      evidenceQuality: "insufficient",
+      supportingChunkIndices: [],
       reason: raw.reason || "no_chunks_retrieved",
       nextAction: "abstain",
       reformulatedQuery: null,
       clarificationQuestion: null,
+      clampedFrom: raw.clampedFrom ?? (raw.nextAction === "answer" || raw.nextAction === "clarify" ? raw.nextAction : null),
     }
   }
+
+  if (raw.nextAction === "answer") {
+    const qualityAllowsAnswer = !raw.evidenceQuality || quality === "sufficient"
+    const isSupportedAnswer = raw.sufficient === true && qualityAllowsAnswer && hasSupportingEvidence
+    if (isSupportedAnswer) {
+      return {
+        sufficient: true,
+        evidenceQuality: "sufficient",
+        supportingChunkIndices: supportingIndicesOut,
+        reason: raw.reason || "sufficient_evidence",
+        nextAction: "answer",
+        reformulatedQuery: null,
+        clarificationQuestion: null,
+        clampedFrom: null,
+      }
+    }
+    const downgradedQuality: EvidenceQuality = quality === "sufficient" ? "insufficient" : quality
+    if (canRetry && isDistinctReformulation) {
+      return {
+        sufficient: false,
+        evidenceQuality: downgradedQuality,
+        supportingChunkIndices: supportingIndicesOut,
+        reason: raw.reason && raw.reason !== "sufficient_evidence" ? raw.reason : "unsupported_answer_decision",
+        nextAction: "retry_retrieval",
+        reformulatedQuery: candidateReformulation,
+        clarificationQuestion: null,
+        clampedFrom: "answer",
+      }
+    }
+    if (downgradedQuality === "partial" && candidateClarification && hasSupportingEvidence) {
+      return {
+        sufficient: false,
+        evidenceQuality: "partial",
+        supportingChunkIndices: supportingIndicesOut,
+        reason: raw.reason && raw.reason !== "sufficient_evidence" ? raw.reason : "partial_evidence_requires_clarification",
+        nextAction: "clarify",
+        reformulatedQuery: null,
+        clarificationQuestion: candidateClarification,
+        clampedFrom: "answer",
+      }
+    }
+    return {
+      sufficient: false,
+      evidenceQuality: downgradedQuality,
+      supportingChunkIndices: supportingIndicesOut,
+      reason: raw.reason && raw.reason !== "sufficient_evidence" ? raw.reason : "unsupported_answer_decision",
+      nextAction: "abstain",
+      reformulatedQuery: null,
+      clarificationQuestion: null,
+      clampedFrom: "answer",
+    }
+  }
+
+  if (raw.nextAction === "clarify") {
+    const qualityAllowsClarify = quality === "partial" || quality === "sufficient"
+    const isSupportedClarify = Boolean(candidateClarification) && qualityAllowsClarify && hasSupportingEvidence
+    if (isSupportedClarify) {
+      return {
+        sufficient: false,
+        evidenceQuality: "partial",
+        supportingChunkIndices: supportingIndicesOut,
+        reason: raw.reason || "partial_evidence_clarification",
+        nextAction: "clarify",
+        reformulatedQuery: null,
+        clarificationQuestion: candidateClarification,
+        clampedFrom: raw.clampedFrom ?? null,
+      }
+    }
+    const downgradedQuality: EvidenceQuality = quality === "sufficient" ? "insufficient" : quality
+    if (canRetry && isDistinctReformulation) {
+      return {
+        sufficient: false,
+        evidenceQuality: downgradedQuality,
+        supportingChunkIndices: supportingIndicesOut,
+        reason: raw.reason || "ungrounded_clarification",
+        nextAction: "retry_retrieval",
+        reformulatedQuery: candidateReformulation,
+        clarificationQuestion: null,
+        clampedFrom: "clarify",
+      }
+    }
+    return {
+      sufficient: false,
+      evidenceQuality: downgradedQuality,
+      supportingChunkIndices: supportingIndicesOut,
+      reason: raw.reason || "ungrounded_clarification",
+      nextAction: "abstain",
+      reformulatedQuery: null,
+      clarificationQuestion: null,
+      clampedFrom: "clarify",
+    }
+  }
+
   return {
-    sufficient: raw.nextAction === "answer" ? true : raw.sufficient,
-    reason: raw.reason || (raw.nextAction === "answer" ? "sufficient_evidence" : "insufficient_evidence"),
-    nextAction: raw.nextAction,
+    sufficient: false,
+    evidenceQuality: quality === "sufficient" ? "insufficient" : quality,
+    supportingChunkIndices: supportingIndicesOut,
+    reason: raw.reason || "insufficient_evidence",
+    nextAction: "abstain",
     reformulatedQuery: null,
-    clarificationQuestion: raw.nextAction === "clarify" ? raw.clarificationQuestion?.trim() || null : null,
+    clarificationQuestion: null,
+    clampedFrom: raw.clampedFrom ?? null,
   }
 }
 
@@ -372,15 +542,34 @@ export async function runBoundedRetrievalLoop(params: {
     advanceStep() // Step 4: retrieval attempt 2 with reformulated query
     params.onStep?.({ phase: "retrieval_attempt_2_started" })
     retrievalAttempts++
+    const priorChunkIds = new Set(chunks.map((chunk) => chunk.id))
     const secondChunks = await params.retrieveForQuery(decision.reformulatedQuery)
+    const newChunkCount = secondChunks.filter((chunk) => !priorChunkIds.has(chunk.id)).length
     chunks = mergeUniqueChunks(secondChunks, chunks, 8)
     params.onStep?.({
       phase: "retrieval_attempt_2_completed",
       authorizedChunks: secondChunks.length,
       mergedAuthorizedChunks: chunks.length,
     })
-    advanceStep() // Step 5: re-evaluate merged evidence
-    decision = await evaluateStep(chunks, retrievalAttempts, previousQueries)
+    advanceStep() // Step 5: re-evaluate merged evidence (short-circuit if retry added zero new chunks)
+    if (usingLlmEvaluator && newChunkCount === 0) {
+      decision = {
+        sufficient: false,
+        evidenceQuality: chunks.length === 0
+          ? "insufficient"
+          : (decision.evidenceQuality === "topical_only" || decision.evidenceQuality === "partial"
+            ? decision.evidenceQuality
+            : "insufficient"),
+        supportingChunkIndices: [],
+        reason: chunks.length === 0 ? "no_chunks_retrieved" : "no_new_evidence_on_retry",
+        nextAction: "abstain",
+        reformulatedQuery: null,
+        clarificationQuestion: null,
+        clampedFrom: null,
+      }
+    } else {
+      decision = await evaluateStep(chunks, retrievalAttempts, previousQueries)
+    }
     params.onStep?.({ phase: "evidence_decision_2", decisionMode, decision: decision.nextAction })
     retrievalSteps.push({
       attempt: 2,
@@ -403,8 +592,13 @@ export async function runBoundedRetrievalLoop(params: {
       max_retrieval_attempts: maxAttempts,
       reformulated,
       evidence_sufficient: decision.sufficient,
+      evidence_quality: decision.evidenceQuality ?? (decision.sufficient ? "sufficient" : "insufficient"),
+      supporting_chunk_count: decision.supportingChunkIndices?.length ?? 0,
+      supporting_chunk_indices: decision.supportingChunkIndices ?? [],
       evidence_reason: decision.reason,
       decision_mode: usingLlmEvaluator ? "llm" : "deterministic",
+      evaluator_decision: decision.nextAction,
+      decision_clamped_from: decision.clampedFrom ?? null,
       next_action: decision.nextAction,
       clarification_question: decision.clarificationQuestion ?? null,
       decision_tokens: decisionTokens,
