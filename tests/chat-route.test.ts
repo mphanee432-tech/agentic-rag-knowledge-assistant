@@ -27,7 +27,7 @@ test("chat only persists and completes verified answers in JSON and SSE modes", 
       else process.env[key] = value
     }
   })
-  t.mock.method(console, "error", () => {})
+  t.mock.method(console, "error", () => { })
   const projectId = "11111111-1111-4111-8111-111111111111"
   const userId = "22222222-2222-4222-8222-222222222222"
   const valid = "Supported answer [Chunk 1, Chunk 2]."
@@ -97,17 +97,45 @@ test("chat only persists and completes verified answers in JSON and SSE modes", 
               return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
             }
             if (url.pathname.endsWith(":generateContent") || url.pathname.endsWith(":streamGenerateContent")) {
+              const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+                tools?: unknown[]
+                generationConfig?: { responseJsonSchema?: unknown }
+              }
+              if (reqBody.tools) {
+                return Response.json({
+                  candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "Question" } } }] }, finishReason: "STOP" }],
+                })
+              }
+              if (reqBody.generationConfig?.responseJsonSchema) {
+                return Response.json({
+                  candidates: [{
+                    content: {
+                      role: "model",
+                      parts: [{
+                        text: JSON.stringify(
+                          scenario.emptyRetrieval
+                            ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                            : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                        ),
+                      }],
+                    },
+                    finishReason: "STOP",
+                  }],
+                })
+              }
               generations++
               const parts = stream ? [scenario.text.slice(0, -3), scenario.text.slice(-3)] : [scenario.text]
               const responses = parts.map((text, i) => ({
-                candidates: [{ index: 0, content: { role: "model", parts: [{ text }] },
-                  ...(i === parts.length - 1 ? { finishReason: scenario.finishReason || "STOP" } : {}) }],
+                candidates: [{
+                  index: 0, content: { role: "model", parts: [{ text }] },
+                  ...(i === parts.length - 1 ? { finishReason: scenario.finishReason || "STOP" } : {})
+                }],
                 usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 },
               }))
               return stream
                 ? new Response(responses.map(body => `data: ${JSON.stringify(body)}\n\n`).join(""), {
-                    headers: { "Content-Type": "text/event-stream" },
-                  })
+                  headers: { "Content-Type": "text/event-stream" },
+                })
                 : Response.json(responses[0])
             }
           }
@@ -115,8 +143,10 @@ test("chat only persists and completes verified answers in JSON and SSE modes", 
           throw new Error("Unexpected request: " + url.href)
         })
         const response = await POST(new Request("https://app.invalid/api/chat", {
-          method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer test-token",
-            ...(scenario.evalStream ? { "x-eval-mode": "true" } : {}) },
+          method: "POST", headers: {
+            "Content-Type": "application/json", Authorization: "Bearer test-token",
+            ...(scenario.evalStream ? { "x-eval-mode": "true" } : {})
+          },
           body: JSON.stringify({ projectId, query: "Question", stream, user_id: "33333333-3333-4333-8333-333333333333" }),
         }))
         if (stream) {
@@ -127,7 +157,8 @@ test("chat only persists and completes verified answers in JSON and SSE modes", 
           const reading = readChatStream(response, event => events.push(event))
           if (scenario.ok) await reading
           else await assert.rejects(reading, /could not be completed/)
-          assert.equal(events[0]?.type, "metadata")
+          assert.equal(events.find(event => event.type !== "agent_step")?.type, "metadata")
+          assert.ok(events.some(event => event.type === "agent_step"))
           assert.equal(events.some(event => event.type === "finish"), scenario.ok)
           if (scenario.ok) {
             assert.equal(events.filter(event => event.type === "text").map(event => event.text).join(""), scenario.text)
@@ -229,13 +260,41 @@ test("organization chat releases only freshly authorized, cited evidence", async
         return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
       }
       if (/:streamGenerateContent$|:generateContent$/.test(url.pathname)) {
+        const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+          tools?: unknown[]
+          generationConfig?: { responseJsonSchema?: unknown }
+        }
+        if (reqBody.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "Question" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (reqBody.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{
+              content: {
+                role: "model",
+                parts: [{
+                  text: JSON.stringify(
+                    scenario.empty
+                      ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                      : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                  ),
+                }],
+              },
+              finishReason: "STOP",
+            }],
+          })
+        }
         assert.ok(url.pathname.includes("/models/gemini-3.5-flash-lite:"))
         assert.match(String(init?.body), /Authorized evidence/)
         assert.match(String(init?.body), /I don't know based on the documents I can access\./)
         assert.doesNotMatch(String(init?.body), /Old revoked answer|private\.pdf/)
         const text = scenario.refusal ?? (scenario.invalid ? "Unverified output [Chunk 99]." : "Use the documented setting [Chunk 1].")
-        const data = { candidates: [{ index: 0, content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
-          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 } }
+        const data = {
+          candidates: [{ index: 0, content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 }
+        }
         return scenario.stream
           ? new Response("data: " + JSON.stringify(data) + "\n\n", { headers: { "Content-Type": "text/event-stream" } })
           : Response.json(data)
@@ -244,8 +303,10 @@ test("organization chat releases only freshly authorized, cited evidence", async
     })
     const response = await POST(new Request("https://app.invalid/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer employee-token", "x-eval-mode": "true" },
-      body: JSON.stringify({ organizationId, query: "Question", stream: scenario.stream,
-        messages: [{ role: "assistant", content: "Old revoked answer" }] }),
+      body: JSON.stringify({
+        organizationId, query: "Question", stream: scenario.stream,
+        messages: [{ role: "assistant", content: "Old revoked answer" }]
+      }),
     }))
     if (scenario.denied) {
       assert.equal(response.status, 404)
@@ -265,8 +326,9 @@ test("organization chat releases only freshly authorized, cited evidence", async
       const events: ChatEvent[] = []
       const wire = response.clone().text()
       await readChatStream(response, event => events.push(event))
-      const metadata = events[0]
-      assert.ok(metadata.type === "metadata")
+      assert.ok(events.some(event => event.type === "agent_step"))
+      const metadata = events.find(event => event.type === "metadata")
+      assert.ok(metadata && metadata.type === "metadata")
       assert.equal(metadata.interactionId, undefined)
       assert.deepEqual(metadata.citations.map(c => c.id), scenario.answer ? [chunkId] : [])
       assert.equal(events.filter(event => event.type === "text").map(event => event.text).join(""), expected)
@@ -283,7 +345,7 @@ test("organization chat releases only freshly authorized, cited evidence", async
     assert.equal(calls.some(path => path.endsWith("/interactions")), false)
     assert.equal(calls.some(path => path.endsWith("/enterprise_fallback_documents")), !scenario.answer)
     assert.equal(calls.some(path => path.endsWith("/enterprise_chunks_still_visible")), !scenario.invalid && !scenario.empty && !scenario.refusal)
-    if (scenario.empty) assert.ok(!calls.some(path => /:streamGenerateContent$|:generateContent$/.test(path)))
+    if (scenario.empty) assert.ok(!calls.some(path => /:streamGenerateContent$/.test(path)))
   })
 })
 
@@ -333,8 +395,10 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
         if (stream) {
           const events: ChatEvent[] = []
           await readChatStream(response, event => events.push(event))
-          assert.deepEqual(events.map(e => e.type), ["metadata", "text", "finish"])
-          assert.equal(events[0]?.type === "metadata" ? events[0].citations.length : -1, 0)
+          const nonAgent = events.filter(e => e.type !== "agent_step")
+          assert.ok(events.some(e => e.type === "agent_step"))
+          assert.deepEqual(nonAgent.map(e => e.type), ["metadata", "text", "finish"])
+          assert.equal(nonAgent[0]?.type === "metadata" ? nonAgent[0].citations.length : -1, 0)
           assert.equal(events.filter(e => e.type === "text").map(e => e.text).join(""), GREETING_RESPONSE)
         } else {
           const body = await response.json()
@@ -349,7 +413,7 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
   }
 
   await t.test("unauthenticated greeting still rejects with 401 before greeting handler", async st => {
-    st.mock.method(console, "info", () => {})
+    st.mock.method(console, "info", () => { })
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") {
@@ -367,7 +431,7 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
   })
 
   await t.test("unauthenticated identity question rejects with 401 before handler", async st => {
-    st.mock.method(console, "info", () => {})
+    st.mock.method(console, "info", () => { })
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") {
@@ -450,8 +514,10 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
           if (stream) {
             const events: ChatEvent[] = []
             await readChatStream(response, event => events.push(event))
-            assert.deepEqual(events.map(e => e.type), ["metadata", "text", "finish"])
-            assert.equal(events[0]?.type === "metadata" ? events[0].citations.length : -1, 0)
+            const nonAgent = events.filter(e => e.type !== "agent_step")
+            assert.ok(events.some(e => e.type === "agent_step"))
+            assert.deepEqual(nonAgent.map(e => e.type), ["metadata", "text", "finish"])
+            assert.equal(nonAgent[0]?.type === "metadata" ? nonAgent[0].citations.length : -1, 0)
             assert.equal(events.filter(e => e.type === "text").map(e => e.text).join(""), expectedText)
           } else {
             const body = await response.json()
@@ -571,7 +637,7 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
     await t.test(scenario.name, async st => {
       const logs: Array<Record<string, unknown>> = []
       st.mock.method(console, "info", (value: string) => { logs.push(JSON.parse(value)) })
-      st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+      st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : String(input))
         if (url.pathname === "/auth/v1/user") {
           return Response.json({ id: userId, aud: "authenticated", role: "authenticated" })
@@ -592,6 +658,32 @@ test("greeting handler and enterprise diagnostics preserve auth, RAG routing, an
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: scenario.query } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      scenario.chunks.length === 0
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           return Response.json({
             candidates: [{ index: 0, content: { role: "model", parts: [{ text: scenario.modelText }] }, finishReason: "STOP" }],
             usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10, totalTokenCount: 20 },
@@ -705,7 +797,7 @@ test("WP9.20: buildEnterprisePolicyPrompt supports excerpt summarization while p
     },
   ]) {
     await t.test(scenario.name, async st => {
-      st.mock.method(console, "info", () => {})
+      st.mock.method(console, "info", () => { })
       let capturedSystemPrompt = ""
       let geminiCalls = 0
       st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -729,8 +821,33 @@ test("WP9.20: buildEnterprisePolicyPrompt supports excerpt summarization while p
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const payload = JSON.parse(String(init?.body || "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (payload.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: scenario.query } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (payload.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      scenario.chunks.length === 0
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           geminiCalls++
-          const payload = JSON.parse(String(init?.body || "{}"))
           capturedSystemPrompt = JSON.stringify(payload)
           return Response.json({
             candidates: [{ index: 0, content: { role: "model", parts: [{ text: scenario.modelText }] }, finishReason: "STOP" }],
@@ -844,7 +961,7 @@ test("WP9.25: Enterprise answer length boundary allows 3400 and 4000 chars, reje
       const logs: Array<Record<string, unknown>> = []
       let geminiCalls = 0
       st.mock.method(console, "info", (value: string) => { logs.push(JSON.parse(value)) })
-      st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+      st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : String(input))
         if (url.pathname === "/auth/v1/user") {
           return Response.json({ id: userId, aud: "authenticated", role: "authenticated" })
@@ -865,6 +982,32 @@ test("WP9.25: Enterprise answer length boundary allows 3400 and 4000 chars, reje
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: scenario.query } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      scenario.chunks.length === 0
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
           geminiCalls++
           return Response.json({
             candidates: [{ index: 0, content: { role: "model", parts: [{ text: scenario.modelText }] }, finishReason: "STOP" }],
@@ -955,7 +1098,7 @@ test("WP9.26: JSON and streaming generation use 1000 maxOutputTokens while keepi
         const logs: Array<Record<string, unknown>> = []
         const seenMaxTokens: number[] = []
         st.mock.method(console, "info", (value: string) => { logs.push(JSON.parse(value)) })
-        st.mock.method(console, "error", () => {})
+        st.mock.method(console, "error", () => { })
         st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = new URL(input instanceof Request ? input.url : String(input))
           if (url.pathname === "/auth/v1/user") {
@@ -977,7 +1120,32 @@ test("WP9.26: JSON and streaming generation use 1000 maxOutputTokens while keepi
             return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
           }
           if (url.pathname.endsWith(":generateContent") || url.pathname.endsWith(":streamGenerateContent")) {
-            const reqBody = JSON.parse(String(init?.body || "{}")) as { generationConfig?: { maxOutputTokens?: number } }
+            const reqBody = JSON.parse(String(init?.body || "{}")) as {
+              tools?: unknown[]
+              generationConfig?: { maxOutputTokens?: number; responseJsonSchema?: unknown }
+            }
+            if (reqBody.tools) {
+              return Response.json({
+                candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "D07 workflow" } } }] }, finishReason: "STOP" }],
+              })
+            }
+            if (reqBody.generationConfig?.responseJsonSchema) {
+              return Response.json({
+                candidates: [{
+                  content: {
+                    role: "model",
+                    parts: [{
+                      text: JSON.stringify(
+                        scenario.chunks.length === 0
+                          ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                          : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                      ),
+                    }],
+                  },
+                  finishReason: "STOP",
+                }],
+              })
+            }
             seenMaxTokens.push(reqBody.generationConfig?.maxOutputTokens ?? -1)
             const payload = {
               candidates: [{ index: 0, content: { role: "model", parts: [{ text: scenario.modelText }] }, finishReason: scenario.finishReason }],
@@ -1130,7 +1298,7 @@ test("WP9.29: enterprise prompt and chat route allow cited grounded negatives wh
       const seenSystemPrompts: string[] = []
       let geminiCalls = 0
       st.mock.method(console, "info", (value: string) => { logs.push(JSON.parse(value)) })
-      st.mock.method(console, "error", () => {})
+      st.mock.method(console, "error", () => { })
       st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(input instanceof Request ? input.url : String(input))
         if (url.pathname === "/auth/v1/user") {
@@ -1152,10 +1320,34 @@ test("WP9.29: enterprise prompt and chat route allow cited grounded negatives wh
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
-          geminiCalls += 1
           const reqBody = JSON.parse(String(init?.body || "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
             systemInstruction?: { parts?: Array<{ text?: string }> }
           }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: scenario.query } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{
+                content: {
+                  role: "model",
+                  parts: [{
+                    text: JSON.stringify(
+                      scenario.chunks.length === 0
+                        ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                        : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                    ),
+                  }],
+                },
+                finishReason: "STOP",
+              }],
+            })
+          }
+          geminiCalls += 1
           seenSystemPrompts.push(reqBody.systemInstruction?.parts?.map(part => part.text ?? "").join("") ?? "")
           return Response.json({
             candidates: [{ index: 0, content: { role: "model", parts: [{ text: scenario.modelText }] }, finishReason: "STOP" }],

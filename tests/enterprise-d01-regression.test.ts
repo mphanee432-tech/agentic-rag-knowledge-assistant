@@ -105,7 +105,27 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
             return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
           }
           if (url.pathname.endsWith(":generateContent")) {
-            const reqBody = JSON.parse(String(init?.body))
+            const reqBody = JSON.parse(String(init?.body)) as {
+              tools?: unknown[]
+              generationConfig?: { responseJsonSchema?: unknown }
+              systemInstruction?: unknown
+            }
+            if (reqBody.tools) {
+              return Response.json({
+                candidates: [{
+                  content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: scenario.query } } }] },
+                  finishReason: "STOP",
+                }],
+              })
+            }
+            if (reqBody.generationConfig?.responseJsonSchema) {
+              return Response.json({
+                candidates: [{
+                  content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] },
+                  finishReason: "STOP",
+                }],
+              })
+            }
             const systemText = JSON.stringify(reqBody.systemInstruction ?? "")
             assert.ok(systemText.includes("1 November 2027"))
             assert.ok(systemText.includes("HR Manager"))
@@ -140,7 +160,7 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
   }
 
   await t.test("missing D01 opening chunk triggers model refusal and clears context cleanly", async (st) => {
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.hostname === "chat-test.invalid") {
         if (url.pathname === "/auth/v1/user") return Response.json({ id: engUserId, aud: "authenticated", role: "authenticated" })
@@ -152,6 +172,20 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
         if (url.pathname.endsWith(":generateContent")) {
+          const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "D01 next review" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "evaluate_answer", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            })
+          }
           return Response.json({
             candidates: [{ content: { role: "model", parts: [{ text: ENTERPRISE_NO_EVIDENCE }] }, finishReason: "STOP" }],
           })
@@ -174,9 +208,9 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
     assert.deepEqual(data.citations, [])
   })
 
-  await t.test("inaccessible source (e.g. D07 under Engineering) returns empty retrieval and safe refusal without calling LLM", async (st) => {
-    let llmCalled = false
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+  await t.test("inaccessible source (e.g. D07 under Engineering) returns empty retrieval and safe refusal without calling final answer LLM", async (st) => {
+    let answerLlmCalled = false
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.hostname === "chat-test.invalid") {
         if (url.pathname === "/auth/v1/user") return Response.json({ id: engUserId, aud: "authenticated", role: "authenticated" })
@@ -188,7 +222,23 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
         if (url.pathname.endsWith(":batchEmbedContents") || url.pathname.endsWith(":embedContent")) {
           return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
         }
-        llmCalled = true
+        if (url.pathname.endsWith(":generateContent")) {
+          const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+            tools?: unknown[]
+            generationConfig?: { responseJsonSchema?: unknown }
+          }
+          if (reqBody.tools) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "D07 accessibility checks" } } }] }, finishReason: "STOP" }],
+            })
+          }
+          if (reqBody.generationConfig?.responseJsonSchema) {
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+            })
+          }
+        }
+        answerLlmCalled = true
       }
       throw new Error(`Unexpected fetch: ${url.toString()}`)
     })
@@ -202,7 +252,7 @@ test("WP9.43: E005, E006, and E008 succeed with cited D01 opening evidence and f
     )
     assert.equal(res.status, 200)
     const data = await res.json()
-    assert.equal(llmCalled, false)
+    assert.equal(answerLlmCalled, false)
     assert.equal(data.text, ENTERPRISE_NO_EVIDENCE)
     assert.equal(data.context, "")
     assert.deepEqual(data.citations, [])

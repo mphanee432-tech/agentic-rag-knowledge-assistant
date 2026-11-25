@@ -1,4 +1,34 @@
 import { create } from "zustand"
+import type { AgentTool, EvidenceAction } from "@/lib/agent-loop"
+
+export interface LiveAgentRetrievalStep {
+  attempt: number
+  authorized_chunks: number
+  decision?: EvidenceAction
+  merged_authorized_chunks?: number
+}
+
+export type AgentInProgressPhase =
+  | "tool_selection"
+  | "retrieval_attempt_1"
+  | "evidence_evaluation_1"
+  | "retrieval_attempt_2"
+  | "evidence_evaluation_2"
+  | "answering"
+
+export interface AgentActivity {
+  status?: "in_progress" | "completed" | "failed"
+  inProgressPhase?: AgentInProgressPhase
+  decisionMode?: "llm" | "deterministic"
+  tool?: AgentTool
+  steps?: number
+  maxSteps?: number
+  retrievalAttempts: number
+  maxRetrievalAttempts: number
+  reformulated: boolean
+  finalOutcome?: EvidenceAction | "tool_executed" | "confirmation_required"
+  retrievalSteps: LiveAgentRetrievalStep[]
+}
 
 export interface Citation {
   id: string
@@ -23,6 +53,7 @@ export interface ChatMessage {
   citations?: Citation[]
   fallbackQuestions?: string[]
   interactionId?: string
+  agentActivity?: AgentActivity
 }
 
 export interface DocumentItem {

@@ -21,7 +21,7 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
       else process.env[key] = value
     }
   })
-  t.mock.method(console, "error", () => {})
+  t.mock.method(console, "error", () => { })
 
   for (const scenario of [
     { name: "single citation", answer: "Answer [Chunk 1]." },
@@ -171,6 +171,30 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
         }
         assert.match(url.pathname, /:streamGenerateContent$|:generateContent$/)
         const body = JSON.parse(String(init?.body))
+        if (body.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "private-query" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (body.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{
+              content: {
+                role: "model",
+                parts: [{
+                  text: JSON.stringify(
+                    scenario.empty
+                      ? { sufficient: false, evidenceQuality: "insufficient", supportingChunkIndices: [], reason: "no_chunks_retrieved", nextAction: "abstain", reformulatedQuery: null, clarificationQuestion: null }
+                      : { sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "sufficient_evidence", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null },
+                  ),
+                }],
+              },
+              finishReason: "STOP",
+            }],
+          })
+        }
+        calls.pop()
+        calls.push("/__final_generation__")
         assert.equal(body.generationConfig.maxOutputTokens, 1000)
         assert.ok(init?.signal)
         if (scenario.deadline || scenario.requestAbort) {
@@ -191,16 +215,20 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
         if (scenario.json) return Response.json({ candidates: [{ content: { role: "model", parts: [{ text: scenario.answer }] }, finishReason: "STOP" }] })
         if (scenario.interrupted) {
           let sentText = false
-          return new Response(new ReadableStream({ async pull(controller) {
-            if (!sentText) { sentText = true; controller.enqueue(providerFrame(scenario.answer)) }
-            else { await textGate; controller.error(new Error("fixture-error-secret")) }
-          } }), { headers: { "Content-Type": "text/event-stream" } })
+          return new Response(new ReadableStream({
+            async pull(controller) {
+              if (!sentText) { sentText = true; controller.enqueue(providerFrame(scenario.answer)) }
+              else { await textGate; controller.error(new Error("fixture-error-secret")) }
+            }
+          }), { headers: { "Content-Type": "text/event-stream" } })
         }
-        return new Response(new ReadableStream({ start(controller) {
-          controller.enqueue(providerFrame(""))
-          controller.enqueue(providerFrame(scenario.answer, true))
-          controller.close()
-        }}), { headers: { "Content-Type": "text/event-stream" } })
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(providerFrame(""))
+            controller.enqueue(providerFrame(scenario.answer, true))
+            controller.close()
+          }
+        }), { headers: { "Content-Type": "text/event-stream" } })
       })
       const req = new Request("https://app.invalid/api/chat", {
         method: "POST", headers: { Authorization: "Bearer fixture-user-token" },
@@ -217,7 +245,7 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
         assert.equal(embeds, scenario.retry ? 2 : 1)
         assert.equal(calls.filter(path => path.includes("/rpc/")).length, 1)
         assert.equal(calls.filter(path => path.endsWith("document_chunks")).length, scenario.empty ? 0 : 1)
-        assert.equal(calls.filter(path => /:streamGenerateContent$|:generateContent$/.test(path)).length, scenario.empty || scenario.initializationError ? 0 : 1)
+        assert.equal(calls.filter(path => path === "/__final_generation__").length, scenario.empty || scenario.initializationError ? 0 : 1)
         assert.equal(calls.filter(path => path.endsWith("/interactions")).length, scenario.failure && !scenario.persistError && !scenario.persistence || scenario.cancel || scenario.requestAbort ? 0 : 1)
         assert.equal(logs.length, scenario.production ? 0 : 1)
         if (!scenario.production) {
@@ -260,13 +288,22 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
       let metrics: Record<string, unknown>
       if (scenario.cancel || scenario.persistence === "stream cancellation") {
         const reader = response.body!.getReader()
-        const first = await reader.read()
-        assert.match(new TextDecoder().decode(first.value), /"type":"metadata"/)
+        const decoder = new TextDecoder()
+        let seenMetadata = false
+        while (!seenMetadata) {
+          const chunk = await reader.read()
+          const frame = decoder.decode(chunk.value)
+          if (/"type":"metadata"/.test(frame)) {
+            seenMetadata = true
+            break
+          }
+          assert.match(frame, /"type":"agent_step"/)
+        }
         if (scenario.persistence) {
           await persistenceStarted
           assert.equal(writeSignal?.aborted, false)
           const text = await reader.read()
-          assert.match(new TextDecoder().decode(text.value), /"type":"text"/)
+          assert.match(decoder.decode(text.value), /"type":"text"/)
           now += persistenceMs
         }
         await reader.cancel()
@@ -333,14 +370,18 @@ test("TTFT instrumentation preserves the request, retrieval, citation and stream
             assert.deepEqual(unhandled, [])
           }
           const wireEvents = (await wire).trim().split("\n\n").map(frame => JSON.parse(frame.slice(6)))
-          assert.deepEqual(wireEvents.map(event => event.type), ["metadata", ...(logs[0].had_first_text && !scenario.emissionError ? ["text"] : []), "error"])
+          const nonAgentWire = wireEvents.filter(event => event.type !== "agent_step")
+          assert.ok(wireEvents.some(event => event.type === "agent_step"))
+          assert.deepEqual(nonAgentWire.map(event => event.type), ["metadata", ...(logs[0].had_first_text && !scenario.emissionError ? ["text"] : []), "error"])
           assert.deepEqual(wireEvents.at(-1), { type: "error", message: "The answer could not be completed. Please retry." })
           checkDiagnostics()
           return
         }
         await completion
-        assert.deepEqual(events.map(event => event.type), ["metadata", "text", "finish"])
-        const metadata = events[0]
+        const nonAgentEvents = events.filter(event => event.type !== "agent_step")
+        assert.ok(events.some(event => event.type === "agent_step"))
+        assert.deepEqual(nonAgentEvents.map(event => event.type), ["metadata", "text", "finish"])
+        const metadata = nonAgentEvents[0]
         assert.ok(metadata.type === "metadata")
         assert.equal(metadata.interactionId, response.headers.get("x-interaction-id"))
         const finish = events.at(-1)
@@ -392,8 +433,10 @@ test("RRF timing includes retries while an unexecuted verification remains null"
     now += 7
     return ++calls === 1 ? Response.json({ message: "temporary" }, { status: 400 }) : Response.json([])
   })
-  const telemetry = { retries: { retrieval: 0 }, errors: [] as string[],
-    rrf_rpc_ms: null as number | null, chunk_verify_ms: null as number | null }
+  const telemetry = {
+    retries: { retrieval: 0 }, errors: [] as string[],
+    rrf_rpc_ms: null as number | null, chunk_verify_ms: null as number | null
+  }
   assert.deepEqual(await retrieveVerifiedChunks(client, "11111111-1111-4111-8111-111111111111",
     Array(1536).fill(0.1), "Question", new AbortController().signal, telemetry), [])
   assert.equal(calls, 2)
@@ -451,8 +494,10 @@ test("attempted retrieval stages retain timings on failure without changing data
         if (scenario === "verification error") return Response.json({ message: "verification denied" }, { status: 403 })
         return Response.json([])
       })
-      const telemetry = { retries: { retrieval: 0 }, errors: [] as string[],
-        rrf_rpc_ms: null as number | null, chunk_verify_ms: null as number | null }
+      const telemetry = {
+        retries: { retrieval: 0 }, errors: [] as string[],
+        rrf_rpc_ms: null as number | null, chunk_verify_ms: null as number | null
+      }
       const result = retrieveVerifiedChunks(client, ` ${project} `, embedding, "Question", new AbortController().signal, telemetry)
       if (scenario === "RPC failure") await assert.rejects(result, /RPC unavailable/)
       else if (scenario === "verification error") await assert.rejects(result, error => (error as { message: string }).message === "verification denied")

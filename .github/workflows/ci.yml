@@ -73,18 +73,86 @@ jobs:
         run: |
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/bootstrap.sql
           for migration in supabase/migrations/*.sql; do
-            if [[ "$migration" == *wp4_security_lifecycle.sql ]]; then
-              # The disposable database already has the bootstrap Cron adapter.
-              sed '/^create extension if not exists pg_cron;$/d' "$migration" | psql -X -v ON_ERROR_STOP=1
-            else
-              psql -X -v ON_ERROR_STOP=1 -f "$migration"
+            case "$migration" in
+              # Clone-specific remediations target the existing agentic-enterprise-rag baseline
+              # and are verified separately in the clone-remediation job.
+              *20261121122157_restore_agentic_enterprise_upload_contracts.sql|*20261121214500_restore_enterprise_fallback_and_search_rpc.sql)
+                echo "Skipping clone-specific migration on fresh baseline: $migration"
+                continue
+                ;;
+              *wp4_security_lifecycle.sql)
+                # The disposable database already has the bootstrap Cron adapter.
+                sed '/^create extension if not exists pg_cron;$/d' "$migration" | psql -X -v ON_ERROR_STOP=1
+                ;;
+              *)
+                psql -X -v ON_ERROR_STOP=1 -f "$migration"
+                ;;
+            esac
+            if [[ "$migration" == *wp6_unified_enterprise_copilot.sql ]]; then
+              psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp6_unified_enterprise_copilot.sql
+            fi
+            if [[ "$migration" == *wp8_public_demo_onboarding.sql ]]; then
+              psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp8_public_demo_onboarding.sql
             fi
           done
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/authorization.sql
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/storage_webhook.sql
-          psql -X -v ON_ERROR_STOP=1 -f supabase/tests/ingestion_recovery.sql
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp2b_enterprise_authorization.sql
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp3_secure_rag_retrieval.sql
           psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp4_security_lifecycle.sql
-          psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp6_unified_enterprise_copilot.sql
-          psql -X -v ON_ERROR_STOP=1 -f supabase/tests/wp8_public_demo_onboarding.sql
+      - name: Verify automatic ingestion dispatch and recovery on disposable Postgres
+        run: |
+          psql -X -v ON_ERROR_STOP=1 -c "create database ingestion_dispatch_test;"
+          sed '/^create role /d' supabase/tests/bootstrap.sql | PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 <<'SQL'
+            alter table net.http_request_queue alter column body type bytea using convert_to(body::text, 'UTF8');
+            create or replace function net.http_post(
+              url text,
+              body jsonb default '{}'::jsonb,
+              params jsonb default '{}'::jsonb,
+              headers jsonb default '{}'::jsonb,
+              timeout_milliseconds integer default 2000
+            ) returns bigint language sql as $$
+              insert into net.http_request_queue(url, body, headers, timeout_milliseconds)
+              values(url, convert_to(body::text, 'UTF8'), headers, timeout_milliseconds) returning id
+            $$;
+            alter table cron.job add column if not exists active boolean default true;
+            create or replace function cron.schedule(job_name text, job_schedule text, job_command text) returns bigint language sql as $$
+              insert into cron.job(jobname, schedule, command) values(job_name, job_schedule, job_command)
+              on conflict(jobname) do update set schedule = excluded.schedule, command = excluded.command
+              returning jobid
+            $$;
+            create or replace function cron.alter_job(job_id bigint, active boolean) returns void language sql as $$
+              update cron.job set active = $2 where jobid = $1
+            $$;
+            create publication supabase_realtime;
+          SQL
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 -f supabase/migrations/202610280001_harden_access_and_ingestion.sql
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 -f supabase/migrations/202611040001_automatic_ingestion_recovery.sql
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 -f supabase/migrations/202611040002_align_storage_webhook.sql
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 -f supabase/ingestion/automatic_dispatch.sql
+          PGDATABASE=ingestion_dispatch_test psql -X -v ON_ERROR_STOP=1 -f supabase/tests/ingestion_recovery.sql
+
+  clone-remediation:
+    name: Clone-specific remediation contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          cache: true
+      - run: pnpm install --frozen-lockfile
+      - name: Install disposable SQL runtime for clone-baseline verification
+        run: npm install --prefix node_modules/.cache/ingestion-sql-runtime --no-save --package-lock=false --ignore-scripts @electric-sql/pglite@0.5.17 @electric-sql/pglite-pgvector@0.0.18
+      - name: Verify clone-specific remediation migrations and safety guards
+        run: |
+          pnpm exec tsx scripts/test_enterprise_upload_contracts.mjs
+          pnpm exec tsx scripts/test_enterprise_authz_eval.mjs
+          pnpm exec tsx scripts/test_jira_signup_provisioning.mjs
+          pnpm exec tsx scripts/test_ingestion_dispatch.mjs

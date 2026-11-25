@@ -8,7 +8,7 @@ import { Bot, User, Check, Copy, AlertCircle, FileText } from "lucide-react"
 import { CitationBadge } from "@/components/chat/citation-badge"
 import { splitCitations } from "@/lib/citations"
 import { MessageActions } from "@/components/chat/message-actions"
-import type { ChatMessage, Citation } from "@/lib/store/chat-store"
+import type { AgentActivity, ChatMessage, Citation } from "@/lib/store/chat-store"
 
 interface MessageItemProps {
   message: ChatMessage
@@ -25,6 +25,9 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
   const isError = !isUser && /^Error:/i.test(displayContent.trim())
   const isRefusal = !isError && displayContent.includes(REFUSAL_PREFIX)
   const citations = message.citations || []
+  const activity = !isUser ? message.agentActivity : undefined
+  const isLiveActivity = Boolean(activity && (isStreaming || activity.status === "in_progress"))
+  const isFailedActivity = Boolean(activity && !isLiveActivity && (isError || activity.status === "failed"))
 
   return (
     <div
@@ -45,6 +48,10 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
             : "items-start"
         }`}
       >
+        {activity && isLiveActivity && (
+          <LiveAgentActivityPanel activity={activity} />
+        )}
+
         <div
           className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-xs ${
             isUser
@@ -71,10 +78,14 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
 
           {/* Render formatted message content */}
           <div className="prose prose-sm dark:prose-invert max-w-none break-words">
-            <FormattedContent
-              content={displayContent}
-              citations={citations}
-            />
+            {isStreaming && !displayContent.trim() ? (
+              <p className="my-0 text-xs text-zinc-400">Waiting for response…</p>
+            ) : (
+              <FormattedContent
+                content={displayContent}
+                citations={citations}
+              />
+            )}
           </div>
 
           {/* Citation Tray if citations exist */}
@@ -98,6 +109,10 @@ export function MessageItem({ message, isStreaming = false }: MessageItemProps) 
             />
           )}
         </div>
+
+        {activity && !isLiveActivity && (
+          <AgentActivityPanel activity={activity} failed={isFailedActivity} />
+        )}
       </div>
 
       {isUser && (
@@ -215,5 +230,179 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
         <pre>{code}</pre>
       </div>
     </div>
+  )
+}
+
+const TOOL_LABELS: Record<NonNullable<AgentActivity["tool"]>, string> = {
+  rag_retrieval: "RAG retrieval (rag_retrieval)",
+  jira_status: "Jira status (jira_status)",
+  jira_status_clarification: "Jira clarification (jira_status_clarification)",
+  jira_create_draft: "Jira draft (jira_create_draft)",
+  deterministic_reply: "Deterministic reply (deterministic_reply)",
+}
+
+const EVIDENCE_DECISION_LABELS: Record<NonNullable<AgentActivity["retrievalSteps"][number]["decision"]>, string> = {
+  answer: "answer",
+  retry_retrieval: "retry",
+  clarify: "clarify",
+  abstain: "abstain",
+}
+
+const OUTCOME_LABELS: Record<NonNullable<AgentActivity["finalOutcome"]>, string> = {
+  answer: "Answer",
+  retry_retrieval: "Retry retrieval",
+  clarify: "Clarify",
+  abstain: "Abstain",
+  tool_executed: "Tool executed",
+  confirmation_required: "Confirmation required",
+}
+
+function AgentActivityRows({
+  activity,
+  live,
+  failed,
+}: {
+  activity: AgentActivity
+  live: boolean
+  failed: boolean
+}) {
+  const attempt1 = activity.retrievalSteps.find((step) => step.attempt === 1)
+  const attempt2 = activity.retrievalSteps.find((step) => step.attempt === 2)
+  const decisionLabelPrefix = activity.decisionMode === "llm" ? "LLM evidence decision" : "Evidence decision"
+
+  return (
+    <dl className={`mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded-lg border px-3 py-2 text-[11px] ${
+      failed
+        ? "border-red-500/25 bg-red-500/5 text-red-700 dark:text-red-300"
+        : "border-zinc-200/80 bg-zinc-50/70 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950/40 dark:text-zinc-300"
+    }`}>
+      {failed && (
+        <>
+          <dt className="font-medium text-red-600 dark:text-red-400">Status</dt>
+          <dd>Interrupted / failed before completion</dd>
+        </>
+      )}
+
+      {live && !activity.tool && (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Status</dt>
+          <dd>Selecting tool (in progress)</dd>
+        </>
+      )}
+
+      {activity.decisionMode && (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Decision mode</dt>
+          <dd>{activity.decisionMode === "llm" ? "LLM" : "Deterministic shortcut"}</dd>
+        </>
+      )}
+
+      {activity.tool && (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Selected tool</dt>
+          <dd className="font-mono text-[11px]">{TOOL_LABELS[activity.tool]}</dd>
+        </>
+      )}
+
+      {attempt1 ? (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Retrieval attempt 1</dt>
+          <dd>
+            {attempt1.authorized_chunks} authorized {attempt1.authorized_chunks === 1 ? "chunk" : "chunks"}
+          </dd>
+
+          {attempt1.decision ? (
+            <>
+              <dt className="font-medium text-zinc-500 dark:text-zinc-400">{decisionLabelPrefix}</dt>
+              <dd>{EVIDENCE_DECISION_LABELS[attempt1.decision]}</dd>
+            </>
+          ) : live && activity.inProgressPhase === "evidence_evaluation_1" ? (
+            <>
+              <dt className="font-medium text-zinc-500 dark:text-zinc-400">{decisionLabelPrefix}</dt>
+              <dd>In progress</dd>
+            </>
+          ) : null}
+        </>
+      ) : live && activity.inProgressPhase === "retrieval_attempt_1" ? (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Retrieval attempt 1</dt>
+          <dd>In progress</dd>
+        </>
+      ) : null}
+
+      {attempt2 ? (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Retrieval attempt 2</dt>
+          <dd>
+            {attempt2.authorized_chunks} authorized {attempt2.authorized_chunks === 1 ? "chunk" : "chunks"}
+            {typeof attempt2.merged_authorized_chunks === "number"
+              ? ` (${attempt2.merged_authorized_chunks} merged)`
+              : ""}
+          </dd>
+
+          {attempt2.decision ? (
+            <>
+              <dt className="font-medium text-zinc-500 dark:text-zinc-400">{decisionLabelPrefix} (attempt 2)</dt>
+              <dd>{EVIDENCE_DECISION_LABELS[attempt2.decision]}</dd>
+            </>
+          ) : live && activity.inProgressPhase === "evidence_evaluation_2" ? (
+            <>
+              <dt className="font-medium text-zinc-500 dark:text-zinc-400">{decisionLabelPrefix} (attempt 2)</dt>
+              <dd>In progress</dd>
+            </>
+          ) : null}
+        </>
+      ) : live && activity.inProgressPhase === "retrieval_attempt_2" ? (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Retrieval attempt 2</dt>
+          <dd>In progress</dd>
+        </>
+      ) : null}
+
+      {!failed && activity.finalOutcome && (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Final outcome</dt>
+          <dd>
+            {OUTCOME_LABELS[activity.finalOutcome]}
+            {live && activity.inProgressPhase === "answering" ? " (streaming response)" : ""}
+          </dd>
+        </>
+      )}
+
+      {typeof activity.steps === "number" && typeof activity.maxSteps === "number" && (
+        <>
+          <dt className="font-medium text-zinc-500 dark:text-zinc-400">Total agent steps</dt>
+          <dd>
+            {activity.steps} / {activity.maxSteps}
+          </dd>
+        </>
+      )}
+    </dl>
+  )
+}
+
+function LiveAgentActivityPanel({ activity }: { activity: AgentActivity }) {
+  return (
+    <div role="status" aria-live="polite" className="w-full px-1">
+      <div className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+        Agent Activity (In progress)
+      </div>
+      <AgentActivityRows activity={activity} live failed={false} />
+    </div>
+  )
+}
+
+function AgentActivityPanel({ activity, failed = false }: { activity: AgentActivity; failed?: boolean }) {
+  return (
+    <details className="w-full px-1">
+      <summary className={`cursor-pointer select-none text-[11px] font-medium ${
+        failed
+          ? "text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+          : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+      }`}>
+        {failed ? "Agent Activity (Interrupted / failed)" : "Agent Activity"}
+      </summary>
+      <AgentActivityRows activity={activity} live={false} failed={failed} />
+    </details>
   )
 }

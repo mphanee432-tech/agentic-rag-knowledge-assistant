@@ -1,40 +1,21 @@
 # Automatic ingestion recovery
 
-The `recover-document-ingestion` Supabase Cron job runs every minute and sends eligible documents to the existing authenticated Storage webhook. The documents table holds retry state; there is no extra queue service or app dependency.
+When activated, the `recover-document-ingestion` Supabase Cron job runs every minute and sends eligible documents to the existing authenticated Storage webhook. The documents table holds retry state; there is no extra queue service or app dependency.
 
 ## Activation
 
-1. Apply the existing `202610280001_harden_access_and_ingestion.sql` migration first.
-2. Enable **Supabase Cron (`pg_cron`)** and **`pg_net`** through the Supabase dashboard. Supabase Vault must also be available. See [Cron installation](https://supabase.com/docs/guides/cron/install) and [scheduled HTTP calls with Vault](https://supabase.com/docs/guides/functions/schedule-functions).
-3. Add these two Vault secrets using the dashboard:
-   - `ingestion_webhook_url`: the full HTTPS URL ending in `/api/webhooks/storage`, with no query string or trailing slash.
-   - `ingestion_webhook_secret`: the same value as the app's server-only `SUPABASE_WEBHOOK_SECRET`.
-4. Apply `supabase/migrations/202611040001_automatic_ingestion_recovery.sql` and deploy the updated application together. The migration installs the recurring job. A missing extension causes migration failure; missing Vault configuration is reported as a failed Cron run instead of silently disabling recovery.
-5. Confirm the job is active and run the staging checks below. The host must support the existing 300-second webhook duration. The scheduled HTTP request uses the same timeout; expired leases recover interrupted requests.
+For the separate Agentic Personal and Enterprise clones, follow
+[Agentic automatic ingestion activation](agentic-automatic-ingestion.md).
+The default setup script mode is read-only and requires `--workspace personal`
+or `--workspace enterprise`. Live `--apply` requires explicit approval; it can
+retry existing eligible documents, including the pending Personal PDF.
 
-No secrets belong in source control, frontend configuration or Cron SQL text. The job reads Vault on each run, so rotate the Vault value and app environment together.
-
-For local Next.js plus ngrok, apply `202611040002_align_storage_webhook.sql` too.
-It replaces the legacy `rag_knowledge_assistant` webhook with `storage.objects.insert`;
-both initial delivery and recovery read the same Vault URL and secret on every call.
-It also adds `public.documents` to the existing Realtime publication when necessary.
-Keep signed binary uploads (`uploadToSignedUrl`); direct browser `.upload()` is
-blocked by the ownership hardening. The browser never invokes the worker webhook.
-
-To refresh bindings after restarting ngrok, put a Supabase management access token
-in the local environment as `SUPABASE_ACCESS_TOKEN` (not the service-role key), then run:
-
-```sh
-python scripts/sync_ingestion.py --apply
-python scripts/sync_ingestion.py
-```
-
-The script discovers the unique HTTPS tunnel forwarding to port 3000, applies
-missing prerequisites, updates Vault, activates Cron and reports only match booleans.
-Read-only mode verifies bindings without changing them. It uses `.env.local` before
-`.env`. Do not print or commit the token or webhook secret. Next.js serves application
-changes locally; SQL migrations go to Supabase. A later tunnel URL requires another
-binding update. If the app secret changes, restart/reload the dev runtime as well.
+Do not replay the historical hardening/recovery migrations against these populated
+clones to activate delivery. Extensions and worker functions already exist.
+The reviewed operational SQL configures scoped Vault URLs, Storage dispatch,
+Realtime and recovery Cron without replacing authorization or worker functions.
+The guide records the missing Enterprise upload/publication prerequisites and
+provides both activation commands and the end-to-end validation plan.
 
 ## Recovery rules
 
@@ -50,6 +31,77 @@ binding update. If the app secret changes, restart/reload the dev runtime as wel
 Each tick examines at most 25 eligible records and queues at most five requests. Dispatchers use an advisory lock; workers use atomic row leases. Work remains in the database until it succeeds or becomes terminal. Source files and document records are retained; orphaned-file deletion remains a separate operation.
 
 ## Monitoring
+
+### Gemini operation retries
+
+Both the Storage webhook (Personal or Enterprise workspace) and the authenticated
+Enterprise ingestion route retry PDF extraction and embedding operations. The
+server-only `GEMINI_INGESTION_MAX_ATTEMPTS` setting counts the initial call: default
+3, supported range 1–10; invalid values fall back to 3. SDK retries are disabled so
+they cannot multiply this limit. No new dependency or database migration is needed.
+
+HTTP 429, 500, 502, 503 and 504, attempt timeouts, and recognized temporary network
+error codes retry with exponential backoff and jitter (1–2 seconds, then 2–4
+seconds by default). `Retry-After` seconds or HTTP dates are a minimum wait. A wait
+that exceeds the remaining execution budget stops the operation instead of
+retrying early. HTTP 400/401/403/404 and other permanent HTTP failures do not retry,
+including at the document recovery level; correct configuration before another
+upload. Generic SDK errors are not assumed to be network failures.
+
+Each extraction attempt has at most 60 seconds; embeddings have 30 seconds. Gemini
+work stops 250 seconds after route entry, within the existing 270-second processing
+window, 300-second host limit, and six-minute database lease. Enterprise client
+cancellation stops work; webhook sender disconnects still do not cancel a claim.
+An ingestion failure cancels sibling embedding operations and their backoff.
+
+Chunks remain in memory until all embeddings succeed. The existing
+`finish_document_ingestion` RPC checks the lease and atomically replaces chunks
+and sets `indexed`; this change does not retry that RPC or modify its transaction.
+Indexed replays skip extraction and persistence. A transient operation exhausting
+its retries uses the existing lease-fenced failure RPC and document backoff, so
+operation retries do not increment `ingestion_attempts` individually.
+
+Server logs identify the stage, HTTP status, attempt, retry delay and whether a
+retry will occur. They omit provider error bodies, API keys, document text and
+embedding vectors. Suggested questions remain optional and do not affect indexing.
+
+### Retry an existing uploaded PDF without re-uploading
+
+After starting the updated local application (or separately approving and deploying
+it), use the **agentic-personal-rag** dashboard SQL editor for this read-only check:
+
+```sql
+select id, status, storage_path, ingestion_attempts,
+       next_ingestion_attempt_at, lease_expires_at
+from public.documents
+where id = '280b7f3f-89bf-48c4-8092-0d9831a6fa31';
+```
+
+Only proceed if this is the intended project, status is `uploaded`, attempts are
+below 3, and `next_ingestion_attempt_at` is non-null and due. Do not reset the
+status, lease, attempt count or scheduled time. If it is already indexed, stop.
+If another worker holds an active lease, wait for that worker instead.
+
+In a trusted PowerShell terminal with the app's existing webhook secret loaded as
+`SUPABASE_WEBHOOK_SECRET`, send **one** request using the returned storage path:
+
+```powershell
+$storagePath = Read-Host 'Exact storage_path from the read-only check'
+if (-not $env:SUPABASE_WEBHOOK_SECRET) { throw 'Load the existing server webhook secret securely first.' }
+Invoke-RestMethod -Method Post `
+  -Uri 'http://localhost:3000/api/webhooks/storage?workspace=personal' `
+  -Headers @{ 'x-webhook-secret' = $env:SUPABASE_WEBHOOK_SECRET } `
+  -ContentType 'application/json' `
+  -Body (@{ storagePath = $storagePath } | ConvertTo-Json) -TimeoutSec 300
+```
+
+The local app must already point its Personal workspace at **agentic-personal-rag**.
+Use the updated deployment URL instead of localhost only after deployment is
+approved. This reuses the stored object and reservation; a successful claim uses
+one remaining database attempt. A 409 consumes no attempt: recheck status and due
+time, rather than looping requests. After a 500, inspect the document and logs
+before consuming another attempt. This procedure enables no trigger or Cron job
+and does not call the bulk recovery dispatcher.
 
 ```sql
 select jobid, jobname, schedule, active

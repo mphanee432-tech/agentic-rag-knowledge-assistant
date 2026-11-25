@@ -1,4 +1,5 @@
--- Run as postgres on an EMPTY, disposable Supabase database with both migrations applied.
+-- Run as postgres on an EMPTY, disposable Supabase database with the recovery migrations
+-- and supabase/ingestion/automatic_dispatch.sql applied. Never use either Agentic project.
 -- psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/ingestion_recovery.sql
 -- All fixtures and pg_net requests roll back; no webhook requests leave this transaction.
 begin;
@@ -27,9 +28,9 @@ begin
   end if;
   select id into secret_id from vault.decrypted_secrets where name = 'ingestion_webhook_url';
   if secret_id is null then
-    perform vault.create_secret('https://ingestion-test.invalid/api/webhooks/storage', 'ingestion_webhook_url');
+    perform vault.create_secret('https://ingestion-test.invalid/api/webhooks/storage?workspace=personal', 'ingestion_webhook_url');
   else
-    perform vault.update_secret(secret_id, 'https://ingestion-test.invalid/api/webhooks/storage');
+    perform vault.update_secret(secret_id, 'https://ingestion-test.invalid/api/webhooks/storage?workspace=personal');
   end if;
   select id into secret_id from vault.decrypted_secrets where name = 'ingestion_webhook_secret';
   if secret_id is null then
@@ -45,6 +46,12 @@ begin
   insert into storage.objects(bucket_id, name)
     select 'documents', storage_path from public.documents
     where id in (retry_doc, stale_doc, pending_doc, crashed_doc, exhausted_doc);
+
+  assert (select count(*) = 5 from net.http_request_queue
+    where url = 'https://ingestion-test.invalid/api/webhooks/storage?workspace=personal'
+      and headers->>'x-webhook-secret' = 'test-only-secret'
+      and convert_from(body, 'UTF8')::jsonb->>'type' = 'INSERT'),
+    'Storage INSERT did not automatically queue authenticated workspace-specific delivery';
 
   assert public.claim_document_ingestion(retry_doc, lease_a), 'First claim failed';
   assert not public.claim_document_ingestion(retry_doc, lease_b), 'Duplicate delivery acquired a live lease';
@@ -107,6 +114,10 @@ begin
   update public.documents set created_at = now() - interval '3 hours' where id = abandoned_doc;
   result := public.recover_document_ingestion();
   assert result->>'dispatched' = '2', 'Lost webhook and expired worker were not dispatched';
+  assert (select count(*) = 2 from net.http_request_queue
+    where url = 'https://ingestion-test.invalid/api/webhooks/storage?workspace=personal'
+      and convert_from(body, 'UTF8')::jsonb ? 'storagePath'),
+    'Recovery did not reuse the scoped Vault endpoint';
   assert result->>'failed' = '2', 'Exhausted worker and abandoned upload were not finalized';
   assert (select status = 'failed' from public.documents where id = abandoned_doc), 'Abandoned upload still consumes quota';
   assert (select status = 'pending_upload' from public.documents where id = fresh_doc), 'Live upload reservation was expired';

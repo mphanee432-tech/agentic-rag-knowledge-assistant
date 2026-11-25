@@ -455,9 +455,9 @@ def evaluate_query(
     auth.get_token()
     t0 = time.perf_counter()
     retries = {"embedding": 0, "retrieval": 0, "generation": 0, "request": 0}
+    errors = []
     for attempt in range(2):
-        # Judge the final attempt; earlier failures are already counted as retries.
-        errors = []
+        # Preserve transport/retry errors across attempts while judging the final response.
         trace_errors = set()
         response_valid = False
         embed_ms = retrieval_ms = ttft_ms = total_ms = 0.0
