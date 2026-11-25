@@ -1,17 +1,17 @@
 # Graph Report - Agentic-rag-knowledge-assistant  (2026-11-25)
 
 ## Corpus Check
-- 84 files · ~43,117 words
+- 84 files · ~43,329 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 2 file(s) not represented in the graph (top: .ico 1, .css 1)
 
 ## Summary
-- 644 nodes · 1647 edges · 26 communities (24 shown, 2 thin omitted)
+- 646 nodes · 1651 edges · 27 communities (25 shown, 2 thin omitted)
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 6 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `6f402be7`
+- Built from commit: `37f7298d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -41,13 +41,14 @@
 - react-dom
 - tw-animate-css@^1.4.0
 - package.json
-- @types/react@^19
+- splitter.ts
+- @types/react-dom@^19
 
 ## God Nodes (most connected - your core abstractions)
 1. `HttpError` - 41 edges
 2. `requireUser()` - 38 edges
 3. `Button()` - 37 edges
-4. `POST()` - 35 edges
+4. `POST()` - 36 edges
 5. `react` - 30 edges
 6. `ProjectCard()` - 27 edges
 7. `apiError()` - 26 edges
@@ -70,15 +71,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (26 total, 2 thin omitted)
+## Communities (27 total, 2 thin omitted)
 
 ### Community 0 - "app/page.tsx"
-Cohesion: 0.13
-Nodes (27): EnterpriseRejectionReason, errorMessage(), FailureCategory, FailureStage, POST(), runtime, sanitizeProviderError(), AgentStepEventData (+19 more)
+Cohesion: 0.14
+Nodes (26): EnterpriseRejectionReason, errorMessage(), FailureCategory, FailureStage, isAbnormalIncompleteFinish(), POST(), runtime, sanitizeProviderError() (+18 more)
 
 ### Community 1 - "Project Dialogs and Controls"
-Cohesion: 0.06
-Nodes (61): createProject(), createProjectAction, deleteProject(), renameProject(), DashboardPage(), DashboardPageProps, RawProjectRecord, CitationBadge() (+53 more)
+Cohesion: 0.05
+Nodes (67): createProject(), createProjectAction, deleteProject(), renameProject(), DashboardPage(), DashboardPageProps, RawProjectRecord, ChatInputProps (+59 more)
 
 ### Community 2 - "next.config.ts"
 Cohesion: 0.33
@@ -97,8 +98,8 @@ Cohesion: 0.09
 Nodes (21): aliases, components, hooks, lib, ui, utils, iconLibrary, menuAccent (+13 more)
 
 ### Community 6 - "jira-ticket.ts"
-Cohesion: 0.15
-Nodes (17): AgentToolDecision, EvidenceDecision, eligibleConversation(), AGENT_DECISION_ATTEMPT_TIMEOUT_MS, AGENT_DECISION_MAX_ATTEMPTS, AGENT_DECISION_TOTAL_TIMEOUT_MS, asTrimmedString(), evaluateEvidenceWithLlm() (+9 more)
+Cohesion: 0.13
+Nodes (18): AgentToolDecision, EvidenceDecision, EvidenceQuality, TokenCounts, JIRA_DESCRIPTION_MAX, JIRA_SUMMARY_MAX, AGENT_DECISION_ATTEMPT_TIMEOUT_MS, AGENT_DECISION_MAX_ATTEMPTS (+10 more)
 
 ### Community 7 - "TypeScript Compiler Configuration"
 Cohesion: 0.11
@@ -106,23 +107,23 @@ Nodes (18): compilerOptions, allowJs, esModuleInterop, incremental, isolatedModu
 
 ### Community 8 - "dependencies"
 Cohesion: 0.11
-Nodes (18): dependencies, class-variance-authority@^0.7.1, cn@^0.4.0, @google/genai@^2.30.0, lucide-react@^1.58.0, next@16.4.6, pdf-lib@^1.17.1, radix-ui@^1.8.1 (+10 more)
+Nodes (19): dependencies, class-variance-authority@^0.7.1, cn@^0.4.0, @google/genai@^2.30.0, lucide-react@^1.58.0, next@16.4.6, pdf-lib@^1.17.1, radix-ui@^1.8.1 (+11 more)
 
 ### Community 9 - "chat/route.ts"
-Cohesion: 0.08
-Nodes (60): DELETE(), GET(), POST(), GET(), GET(), GET(), POST(), POST() (+52 more)
+Cohesion: 0.10
+Nodes (49): DELETE(), GET(), POST(), GET(), GET(), GET(), POST(), POST() (+41 more)
 
 ### Community 10 - "Development and Evaluation Dependencies"
 Cohesion: 0.12
-Nodes (17): devDependencies, promptfoo@^0.124.1, supabase@^3.0.0, @tailwindcss/turbopack@^4, tsx@^4.23.15, @types/dotenv@^8.2.3, @types/node@^20, @types/react-dom@^19 (+9 more)
+Nodes (17): devDependencies, promptfoo@^0.124.1, supabase@^3.0.0, @tailwindcss/turbopack@^4, tsx@^4.23.15, @types/dotenv@^8.2.3, @types/node@^20, @types/react@^19 (+9 more)
 
 ### Community 11 - "Project Commands"
 Cohesion: 0.11
 Nodes (18): scripts, build, dev, dev:test, eval, eval:check, eval:generate, eval:prepare (+10 more)
 
 ### Community 12 - "agent-loop.ts"
-Cohesion: 0.12
-Nodes (26): AbstentionReason, addTokens(), AgentRetrievalStep, AgentTrace, clampEvidenceDecision(), DOMAIN_EXPANSIONS, evaluateRetrievedEvidence(), EvidenceEvaluation (+18 more)
+Cohesion: 0.14
+Nodes (23): AbstentionReason, addTokens(), AgentRetrievalStep, AgentTrace, clampEvidenceDecision(), DOMAIN_EXPANSIONS, evaluateRetrievedEvidence(), EvidenceEvaluation (+15 more)
 
 ### Community 13 - "Workspace Build Permissions"
 Cohesion: 0.25
@@ -141,12 +142,12 @@ Cohesion: 0.17
 Nodes (16): ChatMessagesProps, ISSUE_TAGS, MessageActions(), MessageActionsProps, AgentActivityPanel(), AgentActivityRows(), EVIDENCE_DECISION_LABELS, FormattedContent() (+8 more)
 
 ### Community 17 - "ingest/route.ts"
-Cohesion: 0.14
-Nodes (29): InvalidDocumentError, maxDuration, POST(), runtime, InvalidDocumentError, maxDuration, POST(), runtime (+21 more)
+Cohesion: 0.19
+Nodes (23): InvalidDocumentError, maxDuration, POST(), runtime, InvalidDocumentError, maxDuration, POST(), runtime (+15 more)
 
 ### Community 19 - "chat-container.tsx"
-Cohesion: 0.07
-Nodes (55): AccountSummary(), AccountSummaryProps, ChatContainer(), ChatContainerProps, ChatInput(), ChatInputProps, ChatMessages(), CitationBadgeProps (+47 more)
+Cohesion: 0.06
+Nodes (61): AccountSummary(), AccountSummaryProps, ChatContainer(), ChatContainerProps, ChatInput(), ChatMessages(), CitationBadgeProps, ProjectWorkspaceClient() (+53 more)
 
 ### Community 20 - "systemPrompt.ts"
 Cohesion: 0.53
@@ -157,16 +158,20 @@ Cohesion: 0.10
 Nodes (29): geistMono, geistSans, inter, metadata, RootLayout(), clearPendingDepartmentCookie(), completeDemoOnboarding(), getPendingDepartmentCookie() (+21 more)
 
 ### Community 22 - "react-dom"
-Cohesion: 0.15
-Nodes (9): CAPABILITY_RESPONSE_WITH_JIRA, CAPABILITY_RESPONSE_WITHOUT_JIRA, ChatMessageInput, DeterministicIntent, getDeterministicResponse(), GREETING_RESPONSE, IDENTITY_RESPONSE_WITH_JIRA, IDENTITY_RESPONSE_WITHOUT_JIRA (+1 more)
+Cohesion: 0.14
+Nodes (11): CAPABILITY_RESPONSE_WITH_JIRA, CAPABILITY_RESPONSE_WITHOUT_JIRA, ChatMessageInput, DeterministicIntent, eligibleConversation(), getDeterministicIntent(), getDeterministicResponse(), GREETING_RESPONSE (+3 more)
 
 ### Community 23 - "tw-animate-css@^1.4.0"
-Cohesion: 0.43
-Nodes (5): PERSONAL_SPARSE_STOPWORDS, RagChunk, retrieveVerifiedChunks(), toPersonalSparseQueryText(), withTimeout()
+Cohesion: 0.31
+Nodes (7): PERSONAL_SPARSE_STOPWORDS, RagChunk, retrieveVerifiedChunks(), toPersonalSparseQueryText(), withTimeout(), @supabase/supabase-js@^2.118.0, @supabase/supabase-js
 
 ### Community 24 - "package.json"
-Cohesion: 0.15
-Nodes (12): clsx@^2.1.1, react-markdown@10.1.0, shadcn@^4.21.5, @supabase/supabase-js@^2.118.0, name, packageManager, private, version (+4 more)
+Cohesion: 0.18
+Nodes (10): ai@^7.0.142, remark-gfm@4.0.1, tailwind-merge@^3.7.0, name, packageManager, private, version, ai (+2 more)
+
+### Community 25 - "splitter.ts"
+Cohesion: 0.36
+Nodes (7): checkIsTabular(), ChunkMetadata, DocumentChunk, estimateTokens(), MarkdownBlock, parseBlocks(), splitMarkdown()
 
 ## Knowledge Gaps
 - **2 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
@@ -177,11 +182,11 @@ _Questions this graph is uniquely positioned to answer:_
 - **Why does `react` connect `Project Dialogs and Controls` to `config.ts`, `dependencies`, `package.json`, `chat-container.tsx`, `next-themes`, `package.json`?**
   _High betweenness centrality (0.085) - this node is a cross-community bridge._
 - **Should `app/page.tsx` be split into smaller, more focused modules?**
-  _Cohesion score 0.13333333333333333 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.13793103448275862 - nodes in this community are weakly interconnected._
 - **Why does `next` connect `Project Dialogs and Controls` to `next.config.ts`, `config.ts`, `dependencies`, `chat/route.ts`, `chat-container.tsx`, `next-themes`, `package.json`?**
   _High betweenness centrality (0.049) - this node is a cross-community bridge._
 - **Should `Project Dialogs and Controls` be split into smaller, more focused modules?**
-  _Cohesion score 0.059025394646533974 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.05319355464958261 - nodes in this community are weakly interconnected._
 - **Why does `scripts` connect `Project Commands` to `package.json`?**
   _High betweenness centrality (0.045) - this node is a cross-community bridge._
 - **Should `config.ts` be split into smaller, more focused modules?**

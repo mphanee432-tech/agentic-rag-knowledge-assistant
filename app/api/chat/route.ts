@@ -23,7 +23,13 @@ import {
   type TokenCounts,
 } from '@/lib/agent-loop';
 import { evaluateEvidenceWithLlm, selectAgentToolWithLlm } from '@/lib/llm-agent';
-import { getGeminiErrorStatus, isAbortOrTimeoutError, isTransientGeminiError, sleep, withTransientGeminiRetry } from '@/lib/gemini-ingestion-retry';
+import {
+  getTransientGeminiRetryDelayMs,
+  isAbortOrTimeoutError,
+  isTransientGeminiError,
+  sleep,
+  withTransientGeminiRetry,
+} from '@/lib/gemini-ingestion-retry';
 import { retrieveVerifiedChunks } from '@/lib/retrieve-chunks';
 import { withTimeout } from '@/lib/with-timeout';
 import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citations';
@@ -37,6 +43,7 @@ import {
 } from '@/lib/jira-ticket';
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Request failed';
+const isAbnormalIncompleteFinish = (reason: string) => reason === 'other' || reason === 'error' || reason === 'unknown';
 export const runtime = 'nodejs';
 
 type FailureStage = 'agent_decision' | 'stream_initialization' | 'model_stream_iteration' | 'model_stream_finalization'
@@ -175,7 +182,35 @@ export async function POST(req: Request) {
     tokens: { prompt: 0, completion: 0, total: 0 },
   };
   const logTiming = (status: 'success' | 'error' | 'cancelled') => {
-    if (process.env.NODE_ENV !== 'development') return;
+    if (process.env.NODE_ENV !== 'development') {
+      if (process.env.NODE_ENV !== 'production' || status !== 'error') return;
+      // Production emits sanitized failure-only telemetry without prompts, evidence, or LLM free-text.
+      const prodRecord = {
+        type: 'rag_timing',
+        interaction_id: interactionId,
+        status,
+        request_mode: telemetry.request_mode,
+        model_id: telemetry.model_id,
+        failure_stage: failure.failure_stage,
+        failure_category: failure.failure_category,
+        provider_error_status: failure.provider_error_status,
+        provider_error_code: failure.provider_error_code,
+        provider_error_message: failure.provider_error_message,
+        model_finish_reason: failure.model_finish_reason,
+        model_stream_completed: failure.model_stream_completed,
+        enterprise_rejection_reason: failure.enterprise_rejection_reason,
+        citation_validation_failed: failure.citation_validation_failed,
+        answer_length_failed: failure.answer_length_failed,
+        visibility_recheck_failed: failure.visibility_recheck_failed,
+        had_first_text: telemetry.model_first_text_ms !== null,
+        retrieved_chunk_count: telemetry.retrieved_chunk_count,
+        retries: telemetry.retries,
+        elapsed_ms: performance.now() - reqStart,
+        error_categories: ['request_failed'],
+      };
+      setImmediate(() => console.info(JSON.stringify(prodRecord)));
+      return;
+    }
     // Errors can contain provider or document data; only a controlled category is logged.
     const { errors, ...diagnostics } = telemetry;
     const record = {
@@ -801,6 +836,7 @@ export async function POST(req: Request) {
           {
             signal: req.signal, maxAttempts: 2, attemptTimeoutMs: 25000, totalTimeoutMs: 35000,
             onRetry: () => { telemetry.retries.generation++; },
+            shouldRetryResult: (res) => isAbnormalIncompleteFinish(res.finishReason),
           },
         );
         text = result.text;
@@ -876,11 +912,17 @@ export async function POST(req: Request) {
             generationDeadline = AbortSignal.timeout(35000);
             generationSignal = AbortSignal.any([req.signal, streamAbort.signal, generationDeadline]);
             let modelStreamErrored = false;
-            const maxStreamAttempts = 2; // Bounded pre-first-delta retry; never replay partial streamed output.
+            const maxStreamAttempts = 2; // Bounded pre-emission retry; never replay already-emitted text.
+            const retryStreamAttempt = async (retryErr: unknown, streamAttempt: number) => {
+              telemetry.retries.generation++;
+              text = '';
+              telemetry.model_first_text_ms = null;
+              telemetry.ttft_ms = 0;
+              await sleep(getTransientGeminiRetryDelayMs(retryErr, streamAttempt), generationSignal!);
+            };
             for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt++) {
               let attemptSawError = false;
               let attemptError: unknown = null;
-              let sawChunk = false;
               stage = 'stream_initialization';
               try {
                 const result = streamText({
@@ -903,7 +945,6 @@ export async function POST(req: Request) {
                     throw new Error('Answer exceeds the length limit.');
                   }
                   if (!delta) continue;
-                  sawChunk = true;
                   if (!text) {
                     const firstText = performance.now();
                     telemetry.ttft_ms = Math.round(firstText - reqStart);
@@ -918,26 +959,40 @@ export async function POST(req: Request) {
                     }
                   }
                 }
-                if (attemptSawError && !text && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(attemptError)) {
-                  telemetry.retries.generation++;
-                  await sleep(getGeminiErrorStatus(attemptError) === 429 ? 2000 : 250, generationSignal);
+                if (attemptSawError && emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(attemptError)) {
+                  await retryStreamAttempt(attemptError, streamAttempt);
                   continue;
                 }
                 if (attemptSawError) {
                   modelStreamErrored = true;
                   recordFailure('model_stream_iteration', attemptError);
+                  stage = 'model_stream_finalization';
+                  rag.updateUsage(await result.usage);
+                  finishReason = await result.finishReason;
+                  failure.model_finish_reason = finishReason;
+                  failure.model_stream_completed = false;
+                  break;
                 }
                 stage = 'model_stream_finalization';
-                rag.updateUsage(await result.usage);
-                finishReason = await result.finishReason;
+                const attemptUsage = await result.usage;
+                const attemptFinishReason = await result.finishReason;
+                const incompleteFinish = isAbnormalIncompleteFinish(attemptFinishReason);
+                if (incompleteFinish && emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted) {
+                  await retryStreamAttempt(null, streamAttempt);
+                  continue;
+                }
+                if (incompleteFinish) {
+                  modelStreamErrored = true;
+                }
+                rag.updateUsage(attemptUsage);
+                finishReason = attemptFinishReason;
                 failure.model_finish_reason = finishReason;
                 failure.model_stream_completed = !modelStreamErrored && !generationSignal.aborted;
                 break;
               } catch (error) {
                 const retryErr = attemptError ?? error;
-                if (!sawChunk && !text && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(retryErr)) {
-                  telemetry.retries.generation++;
-                  await sleep(getGeminiErrorStatus(retryErr) === 429 ? 2000 : 250, generationSignal);
+                if (emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(retryErr)) {
+                  await retryStreamAttempt(retryErr, streamAttempt);
                   continue;
                 }
                 if (attemptSawError && !generationSignal.aborted) {

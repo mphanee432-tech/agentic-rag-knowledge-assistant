@@ -114,13 +114,27 @@ export async function withGeminiRetry<T>(
   throw new Error("Gemini attempts exhausted.")
 }
 
-export interface TransientRetryOptions {
+export interface TransientRetryOptions<T = unknown> {
   signal: AbortSignal
   maxAttempts: number
   attemptTimeoutMs: number
   totalTimeoutMs: number
   baseDelayMs?: number
   onRetry?: () => void
+  shouldRetryResult?: (result: T) => boolean
+}
+
+export function getTransientGeminiRetryDelayMs(
+  error: unknown,
+  attempt: number,
+  baseDelayMs = 250,
+): number {
+  const effectiveBase =
+    baseDelayMs > 0 && getGeminiErrorStatus(error) === 429
+      ? Math.max(baseDelayMs, 2000)
+      : baseDelayMs
+  const jittered = Math.round(effectiveBase * 2 ** (attempt - 1) * (1 + Math.random() * 0.25))
+  return Math.max(jittered, retryAfterMs(error))
 }
 
 /**
@@ -129,7 +143,15 @@ export interface TransientRetryOptions {
  */
 export async function withTransientGeminiRetry<T>(
   operation: (attemptSignal: AbortSignal) => Promise<T>,
-  { signal, maxAttempts, attemptTimeoutMs, totalTimeoutMs, baseDelayMs = 250, onRetry }: TransientRetryOptions,
+  {
+    signal,
+    maxAttempts,
+    attemptTimeoutMs,
+    totalTimeoutMs,
+    baseDelayMs = 250,
+    onRetry,
+    shouldRetryResult,
+  }: TransientRetryOptions<T>,
 ): Promise<{ result: T; retries: number }> {
   const deadline = Date.now() + totalTimeoutMs
   const attempts = Math.max(1, maxAttempts)
@@ -144,17 +166,21 @@ export async function withTransientGeminiRetry<T>(
     try {
       const result = await operation(attemptSignal)
       signal.throwIfAborted()
+      if (shouldRetryResult?.(result)) {
+        const delay = getTransientGeminiRetryDelayMs(undefined, attempt, baseDelayMs)
+        const remainingAfterAttempt = deadline - Date.now()
+        if (attempt < attempts && delay < remainingAfterAttempt) {
+          onRetry?.()
+          await sleep(delay, signal)
+          continue
+        }
+      }
       return { result, retries: attempt - 1 }
     } catch (error) {
       signal.throwIfAborted()
       const timedOutAttempt = attemptSignal.aborted && !signal.aborted
       const transient = timedOutAttempt || isTransientGeminiError(error)
-      const effectiveBase =
-        baseDelayMs > 0 && getGeminiErrorStatus(error) === 429
-          ? Math.max(baseDelayMs, 2000)
-          : baseDelayMs
-      const jittered = Math.round(effectiveBase * 2 ** (attempt - 1) * (1 + Math.random() * 0.25))
-      const delay = Math.max(jittered, retryAfterMs(error))
+      const delay = getTransientGeminiRetryDelayMs(error, attempt, baseDelayMs)
       const remainingAfterAttempt = deadline - Date.now()
       const canRetry = !signal.aborted && transient && attempt < attempts && delay < remainingAfterAttempt
       if (!canRetry) throw error
