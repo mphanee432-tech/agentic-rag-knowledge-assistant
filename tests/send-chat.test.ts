@@ -601,3 +601,28 @@ test("Live Agent Activity updates incrementally before finish/text and handles i
   assert.ok(failedHtml.includes("Interrupted / failed before completion"))
   assert.ok(!failedHtml.includes("Final outcome"))
 })
+
+test("MessageActions hides Helpful and Issue buttons without interactionId while retaining Copy and showing them when persisted", () => {
+  const unpersistedHtml = renderToStaticMarkup(createElement(MessageItem, {
+    message: { id: "ent-1", role: "assistant", content: "Enterprise response [Chunk 1]." },
+    isStreaming: false,
+  }))
+  assert.ok(unpersistedHtml.includes("Copy"))
+  assert.ok(!unpersistedHtml.includes("Helpful"))
+  assert.ok(!unpersistedHtml.includes("Issue"))
+  assert.ok(!unpersistedHtml.includes("Waiting for interaction ID"))
+
+  const persistedHtml = renderToStaticMarkup(createElement(MessageItem, {
+    message: {
+      id: "pers-1",
+      role: "assistant",
+      content: "Persisted response [Chunk 1].",
+      interactionId: "11111111-1111-4111-8111-111111111111",
+    },
+    isStreaming: false,
+  }))
+  assert.ok(persistedHtml.includes("Copy"))
+  assert.ok(persistedHtml.includes("Helpful"))
+  assert.ok(persistedHtml.includes("Issue"))
+  assert.ok(!persistedHtml.includes("Waiting for interaction ID"))
+})

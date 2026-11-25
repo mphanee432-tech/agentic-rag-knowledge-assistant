@@ -1388,3 +1388,58 @@ test("WP9.29: enterprise prompt and chat route allow cited grounded negatives wh
     })
   }
 })
+
+test("Personal deterministic replies omit unpersisted interactionId while keeping Personal RAG persistence intact", async (t) => {
+  const env = {
+    NEXT_PUBLIC_SUPABASE_URL: "https://personal-det.invalid",
+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon",
+    SUPABASE_SECRET_KEY: "test-service-secret",
+    GOOGLE_GENERATIVE_AI_API_KEY: "test-google",
+  }
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]))
+  Object.assign(process.env, env)
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+
+  const projectId = "11111111-1111-4111-8111-111111111111"
+  const userId = "22222222-2222-4222-8222-222222222222"
+  for (const stream of [false, true]) {
+    await t.test(`Personal deterministic greeting (${stream ? "SSE" : "JSON"}) emits no interactionId`, async st => {
+      let interactionWrites = 0
+      st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+        const url = new URL(input instanceof Request ? input.url : String(input))
+        if (url.pathname === "/auth/v1/user") return Response.json({ id: userId, role: "authenticated" })
+        if (url.pathname === "/rest/v1/projects") return Response.json([{ id: projectId, user_id: userId }])
+        if (url.pathname === "/rest/v1/interactions") {
+          interactionWrites++
+          return Response.json([], { status: 201 })
+        }
+        throw new Error(`Unexpected request: ${url.pathname}`)
+      })
+
+      const response = await POST(new Request("https://app.invalid/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer personal-token" },
+        body: JSON.stringify({ projectId, query: "Hello!", stream }),
+      }))
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get("x-interaction-id"), null)
+      assert.equal(interactionWrites, 0)
+      if (stream) {
+        const events: ChatEvent[] = []
+        await readChatStream(response, ev => events.push(ev))
+        const meta = events.find(ev => ev.type === "metadata")
+        assert.ok(meta && meta.type === "metadata")
+        assert.equal(meta.interactionId, undefined)
+      } else {
+        const body = await response.json() as { text: string; interactionId?: string }
+        assert.equal(body.text, GREETING_RESPONSE)
+        assert.equal(body.interactionId, undefined)
+      }
+    })
+  }
+})

@@ -16,6 +16,7 @@ export type AgentTool =
   | "jira_status"
   | "jira_status_clarification"
   | "jira_create_draft"
+  | "jira_create_denied"
   | "rag_retrieval"
 export type JiraTicketDraft = NonNullable<ReturnType<typeof draftJiraTicket>>
 
@@ -24,6 +25,7 @@ export type AgentToolDecision =
   | { tool: "jira_status"; issueKey: string; requiresConfirmation: false }
   | { tool: "jira_status_clarification"; requiresConfirmation: false }
   | { tool: "jira_create_draft"; draft: JiraTicketDraft; requiresConfirmation: true }
+  | { tool: "jira_create_denied"; requiresConfirmation: false }
   | { tool: "rag_retrieval"; searchQuery?: string; requiresConfirmation: false }
 
 export interface TokenCounts {
@@ -143,11 +145,11 @@ export function selectAgentTool(
       }
       return { tool: "jira_status_clarification", requiresConfirmation: false }
     }
-  }
-  if (options.jiraAccessAvailable) {
     const draft = draftJiraTicket(query)
     if (draft) {
-      return { tool: "jira_create_draft", draft, requiresConfirmation: true }
+      return options.jiraAccessAvailable
+        ? { tool: "jira_create_draft", draft, requiresConfirmation: true }
+        : { tool: "jira_create_denied", requiresConfirmation: false }
     }
   }
   return { tool: "rag_retrieval", requiresConfirmation: false }

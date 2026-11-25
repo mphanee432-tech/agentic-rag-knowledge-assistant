@@ -1047,6 +1047,24 @@ test("WP9.24: authoritative demo_jira_access enforces backend, chatbot, UI, stat
     assert.equal(uiSummary.jiraAccessAvailable, expectAvailable)
   }
 
+  // Disabled/missing Jira enterprise accounts receive explicit denial in /api/chat rather than RAG clarification
+  for (const deniedToken of ["eng-disabled", "eng-missing", "meta-true-db-false", "db-error"]) {
+    const deniedChatRes = await POST_CHAT(
+      req("/api/chat", { organizationId: orgId, query: "Create a Jira ticket for repeated VPN disconnects", stream: false }, deniedToken),
+    )
+    assert.equal(deniedChatRes.status, 200)
+    const deniedChatJson = (await deniedChatRes.json()) as {
+      text: string
+      jiraDraft?: unknown
+      metrics?: { agent?: { tool?: string; retrieval_attempts?: number } }
+    }
+    assert.equal(deniedChatJson.text, "Jira access is not enabled for this account.")
+    assert.equal(deniedChatJson.jiraDraft, undefined)
+    assert.equal(deniedChatJson.metrics?.agent?.tool, "jira_create_denied")
+    assert.equal(deniedChatJson.metrics?.agent?.retrieval_attempts, 0)
+  }
+  assert.equal(createWebhookCalls, 3)
+
   // Inactive Enterprise employee UI stays Disabled even when dbJira is true
   assert.equal(
     buildAccountSummary({

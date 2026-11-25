@@ -80,6 +80,13 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
     })
     assert.equal(draftDecision.tool, "jira_create_draft")
     assert.equal(draftDecision.requiresConfirmation, true)
+    assert.deepEqual(selectAgentTool("Create a Jira ticket for: PDF upload fails", {
+      isEnterprise: true,
+      jiraAccessAvailable: false,
+    }), {
+      tool: "jira_create_denied",
+      requiresConfirmation: false,
+    })
     assert.deepEqual(selectAgentTool("What is the leave notice policy?", { isEnterprise: true, jiraAccessAvailable: true }), {
       tool: "rag_retrieval",
       requiresConfirmation: false,

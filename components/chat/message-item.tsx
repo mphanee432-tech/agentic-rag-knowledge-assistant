@@ -238,6 +238,7 @@ const TOOL_LABELS: Record<NonNullable<AgentActivity["tool"]>, string> = {
   jira_status: "Jira status (jira_status)",
   jira_status_clarification: "Jira clarification (jira_status_clarification)",
   jira_create_draft: "Jira draft (jira_create_draft)",
+  jira_create_denied: "Jira access denied (jira_create_denied)",
   deterministic_reply: "Deterministic reply (deterministic_reply)",
 }
 

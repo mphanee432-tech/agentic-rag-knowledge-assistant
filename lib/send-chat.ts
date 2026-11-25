@@ -17,6 +17,7 @@ const VALID_TOOLS = new Set<AgentTool>([
   "jira_status",
   "jira_status_clarification",
   "jira_create_draft",
+  "jira_create_denied",
   "rag_retrieval",
 ])
 const VALID_EVIDENCE_ACTIONS = new Set<EvidenceAction>(["answer", "retry_retrieval", "clarify", "abstain"])
