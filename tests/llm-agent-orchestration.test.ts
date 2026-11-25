@@ -1023,4 +1023,36 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
     assert.match(body.text, /\[Chunk 1\]/)
     assert.equal(body.metrics.agent.final_outcome, "clarify")
   })
+
+  await t.test("20. Paraphrased Jira creation phrasing for disabled account routes to jira_create_denied without jira_create_draft or RAG", async (st) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "u-cxo", role: "authenticated" })
+      if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") return Response.json([{ organization_id: ORG_ID, can_upload_policy: true }])
+      if (url.pathname === "/rest/v1/demo_jira_access") return Response.json(null)
+      if (url.pathname === "/rest/v1/rpc/enterprise_account_status") return Response.json([{ organization_id: ORG_ID, role: "cxo", is_active: true }])
+      if (url.hostname === "generativelanguage.googleapis.com" && url.pathname.endsWith(":generateContent")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: Array<{ functionDeclarations?: Array<{ name: string }> }> }
+        const declared = body.tools?.[0]?.functionDeclarations?.map(f => f.name) ?? []
+        assert.ok(!declared.includes("jira_create_draft"), "Unauthorized user must NOT receive jira_create_draft tool")
+        assert.ok(declared.includes("jira_create_denied"), "Unauthorized Enterprise user must receive jira_create_denied tool")
+        return Response.json({
+          candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "jira_create_denied", args: {} } }] }, finishReason: "STOP" }],
+        })
+      }
+      assert.fail(`Unexpected URL: ${url.href}`)
+    })
+
+    const res = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer cxo-tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ organizationId: ORG_ID, query: "Could you open an issue in Jira because the SSO login fails?", stream: false }),
+    }))
+    assert.equal(res.status, 200)
+    const body = await res.json() as { text: string; jiraDraft?: unknown; metrics: { agent: { tool: string; retrieval_attempts: number } } }
+    assert.equal(body.text, "Jira access is not enabled for this account.")
+    assert.equal(body.jiraDraft, undefined)
+    assert.equal(body.metrics.agent.tool, "jira_create_denied")
+    assert.equal(body.metrics.agent.retrieval_attempts, 0)
+  })
 })

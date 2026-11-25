@@ -28,7 +28,7 @@ export type AgentStepPhase =
 export interface AgentStepEventData {
   phase: AgentStepPhase
   decisionMode?: "llm" | "deterministic"
-  tool?: "deterministic_reply" | "jira_status" | "jira_status_clarification" | "jira_create_draft" | "rag_retrieval"
+  tool?: "deterministic_reply" | "jira_status" | "jira_status_clarification" | "jira_create_draft" | "jira_create_denied" | "rag_retrieval"
   authorizedChunks?: number
   mergedAuthorizedChunks?: number
   decision?: "answer" | "retry_retrieval" | "clarify" | "abstain"

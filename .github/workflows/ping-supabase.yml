@@ -70,7 +70,7 @@ jobs:
             auth_code=$(curl -sS -o "$token_file" -w "%{http_code}" -X POST "${base_url}/auth/v1/token?grant_type=password" \
               -H "apikey: ${public_key}" \
               -H "Content-Type: application/json" \
-              -d "$(python3 -c 'import json,os; print(json.dumps({"email": os.environ["E"], "password": os.environ["P"]}))' E="$email" P="$password")")
+              -d "$(E="$email" P="$password" python3 -c 'import json,os; print(json.dumps({"email": os.environ["E"], "password": os.environ["P"]}))')")
             if [ "$auth_code" -ne 200 ]; then
               echo "::error::${label} evaluation user sign-in failed (HTTP ${auth_code})."
               return 1

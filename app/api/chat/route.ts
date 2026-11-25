@@ -30,6 +30,7 @@ import { citationIndices, safeCitationPrefix, validCitations } from '@/lib/citat
 import { getEnterpriseFallbackQuestions } from '@/lib/enterprise-fallback';
 import { lookupEnterpriseJiraStatus } from '@/lib/jira-status';
 import {
+  draftJiraTicket,
   extractLatestJiraTicketKeyFromMessages,
   formatJiraStatusMessage,
   JIRA_STATUS_CLARIFICATION_PROMPT,
@@ -241,23 +242,27 @@ export async function POST(req: Request) {
     } else if (exactDeterministicIntent) {
       toolDecision = { tool: 'deterministic_reply', intent: exactDeterministicIntent, requiresConfirmation: false };
     } else {
-      stage = 'agent_decision';
       const jiraAccessAvailable = enterprise ? await getJiraAccess() : false;
-      const llmSelection = await selectAgentToolWithLlm({
-        modelId: generationModelId,
-        userQuery,
-        isEnterprise: enterprise,
-        jiraAccessAvailable,
-        lastJiraTicketKey: resolvedLastTicketKey,
-        signal: req.signal,
-        onRetry: () => { telemetry.retries.agent_decision++; },
-      });
-      toolDecision = llmSelection.decision;
-      toolSelectionMs = llmSelection.decisionMs;
-      decisionMode = 'llm';
-      addDecisionTokens(llmSelection.tokens);
-      telemetry.tool_selection_ms = Math.round(toolSelectionMs);
-      telemetry.agent_decision_ms = Math.round(toolSelectionMs);
+      if (enterprise && !jiraAccessAvailable && draftJiraTicket(userQuery)) {
+        toolDecision = { tool: 'jira_create_denied', requiresConfirmation: false };
+      } else {
+        stage = 'agent_decision';
+        const llmSelection = await selectAgentToolWithLlm({
+          modelId: generationModelId,
+          userQuery,
+          isEnterprise: enterprise,
+          jiraAccessAvailable,
+          lastJiraTicketKey: resolvedLastTicketKey,
+          signal: req.signal,
+          onRetry: () => { telemetry.retries.agent_decision++; },
+        });
+        toolDecision = llmSelection.decision;
+        toolSelectionMs = llmSelection.decisionMs;
+        decisionMode = 'llm';
+        addDecisionTokens(llmSelection.tokens);
+        telemetry.tool_selection_ms = Math.round(toolSelectionMs);
+        telemetry.agent_decision_ms = Math.round(toolSelectionMs);
+      }
     }
 
     const respondDirectToolReply = (
@@ -271,7 +276,6 @@ export async function POST(req: Request) {
       failure.retrieved_chunks_found = false;
       const directHeaders = {
         'Cache-Control': 'no-store',
-        ...(!enterprise ? { 'x-interaction-id': interactionId } : {}),
         'x-rag-embedding-ms': '0',
         'x-rag-retrieval-ms': '0',
       };
@@ -286,7 +290,6 @@ export async function POST(req: Request) {
           citations: [],
           retrieved_chunks: [],
           ...(draft ? { jiraDraft: draft } : {}),
-          ...(!enterprise ? { interactionId } : {}),
           metrics: telemetry,
         }, { headers: directHeaders });
       }
@@ -311,7 +314,7 @@ export async function POST(req: Request) {
                 maxSteps: agentTrace.max_steps,
               },
             }));
-            controller.enqueue(encodeEvent({ type: 'metadata', ...(!enterprise ? { interactionId } : {}), citations: [] }));
+            controller.enqueue(encodeEvent({ type: 'metadata', citations: [] }));
             telemetry.ttft_ms = Math.round(performance.now() - reqStart);
             telemetry.server_ttft_ms = performance.now() - reqStart;
             if (draft) controller.enqueue(encodeEvent({ type: 'jira_draft', draft }));
@@ -398,23 +401,60 @@ export async function POST(req: Request) {
       });
     }
 
-    if (toolDecision.tool === 'jira_create_draft' && enterprise && (await getJiraAccess())) {
+    if (toolDecision.tool === 'jira_create_denied' && enterprise) {
       return respondDirectToolReply(
-        'Please review and confirm the Jira ticket details below before creating it.',
+        'Jira access is not enabled for this account.',
         {
-          tool: 'jira_create_draft',
+          tool: 'jira_create_denied',
           steps: 2,
           max_steps: MAX_AGENT_STEPS,
           retrieval_attempts: 0,
           max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
           reformulated: false,
-          evidence_sufficient: true,
-          evidence_reason: 'confirmation_required',
+          evidence_sufficient: false,
+          evidence_reason: 'jira_access_disabled',
           decision_mode: decisionMode,
-          next_action: 'confirmation_required',
+          next_action: 'tool_executed',
           decision_tokens: decisionTokens,
         },
-        toolDecision.draft,
+      );
+    }
+
+    if (toolDecision.tool === 'jira_create_draft' && enterprise) {
+      if (await getJiraAccess()) {
+        return respondDirectToolReply(
+          'Please review and confirm the Jira ticket details below before creating it.',
+          {
+            tool: 'jira_create_draft',
+            steps: 2,
+            max_steps: MAX_AGENT_STEPS,
+            retrieval_attempts: 0,
+            max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+            reformulated: false,
+            evidence_sufficient: true,
+            evidence_reason: 'confirmation_required',
+            decision_mode: decisionMode,
+            next_action: 'confirmation_required',
+            decision_tokens: decisionTokens,
+          },
+          toolDecision.draft,
+        );
+      }
+      return respondDirectToolReply(
+        'Jira access is not enabled for this account.',
+        {
+          tool: 'jira_create_denied',
+          steps: 2,
+          max_steps: MAX_AGENT_STEPS,
+          retrieval_attempts: 0,
+          max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
+          reformulated: false,
+          evidence_sufficient: false,
+          evidence_reason: 'jira_access_disabled',
+          decision_mode: decisionMode,
+          next_action: 'tool_executed',
+          decision_tokens: decisionTokens,
+        },
       );
     }
     const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY });

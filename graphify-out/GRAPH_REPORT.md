@@ -1,28 +1,28 @@
 # Graph Report - Agentic-rag-knowledge-assistant  (2026-11-25)
 
 ## Corpus Check
-- 84 files · ~42,910 words
+- 84 files · ~43,117 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 2 file(s) not represented in the graph (top: .ico 1, .css 1)
 
 ## Summary
-- 644 nodes · 1645 edges · 26 communities (24 shown, 2 thin omitted)
+- 644 nodes · 1647 edges · 26 communities (24 shown, 2 thin omitted)
 - Extraction: 100% EXTRACTED · 0% INFERRED · 0% AMBIGUOUS · INFERRED: 6 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `6fceca85`
+- Built from commit: `6f402be7`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
-- chat/route.ts
+- app/page.tsx
 - Project Dialogs and Controls
 - next.config.ts
 - config.ts
 - Prompt Evaluation Configuration
 - Component Library Configuration
-- llm-agent.ts
+- jira-ticket.ts
 - TypeScript Compiler Configuration
 - dependencies
 - chat/route.ts
@@ -32,14 +32,14 @@
 - Workspace Build Permissions
 - Lint Configuration
 - Tailwind Theme Configuration
-- message-item.tsx
+- package.json
 - ingest/route.ts
 - eval-dataset.ts
 - chat-container.tsx
 - systemPrompt.ts
-- login/page.tsx
-- chat-input.ts
-- retrieve-chunks.ts
+- next-themes
+- react-dom
+- tw-animate-css@^1.4.0
 - package.json
 - @types/react@^19
 
@@ -47,7 +47,7 @@
 1. `HttpError` - 41 edges
 2. `requireUser()` - 38 edges
 3. `Button()` - 37 edges
-4. `POST()` - 34 edges
+4. `POST()` - 35 edges
 5. `react` - 30 edges
 6. `ProjectCard()` - 27 edges
 7. `apiError()` - 26 edges
@@ -56,23 +56,23 @@
 10. `scripts` - 18 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `POST()` --calls--> `lookupEnterpriseJiraStatus()`  [EXTRACTED]
-  app/api/chat/route.ts → lib/jira-status.ts
-- `ChatContainer()` --calls--> `formatJiraStatusMessage()`  [EXTRACTED]
-  components/chat/chat-container.tsx → lib/jira-ticket.ts
-- `ChatContainer()` --calls--> `extractLatestJiraTicketKeyFromMessages()`  [EXTRACTED]
-  components/chat/chat-container.tsx → lib/jira-ticket.ts
-- `POST()` --calls--> `selectAgentToolWithLlm()`  [EXTRACTED]
-  app/api/chat/route.ts → lib/llm-agent.ts
-- `POST()` --calls--> `evaluateEvidenceWithLlm()`  [EXTRACTED]
-  app/api/chat/route.ts → lib/llm-agent.ts
+- `POST()` --calls--> `runBoundedRetrievalLoop()`  [EXTRACTED]
+  app/api/chat/route.ts → lib/agent-loop.ts
+- `POST()` --calls--> `getEnterpriseCopilotContext()`  [EXTRACTED]
+  app/api/chat/route.ts → lib/auth.ts
+- `POST()` --calls--> `HttpError`  [EXTRACTED]
+  app/api/chat/route.ts → lib/auth.ts
+- `POST()` --calls--> `isJiraAccessAvailable()`  [EXTRACTED]
+  app/api/chat/route.ts → lib/auth.ts
+- `POST()` --calls--> `requireChatProject()`  [EXTRACTED]
+  app/api/chat/route.ts → lib/auth.ts
 
 ## Import Cycles
 - None detected.
 
 ## Communities (26 total, 2 thin omitted)
 
-### Community 0 - "chat/route.ts"
+### Community 0 - "app/page.tsx"
 Cohesion: 0.13
 Nodes (27): EnterpriseRejectionReason, errorMessage(), FailureCategory, FailureStage, POST(), runtime, sanitizeProviderError(), AgentStepEventData (+19 more)
 
@@ -96,7 +96,7 @@ Nodes (28): projectId, promptVariant, query, stream, apiKey, body, headers, meth
 Cohesion: 0.09
 Nodes (21): aliases, components, hooks, lib, ui, utils, iconLibrary, menuAccent (+13 more)
 
-### Community 6 - "llm-agent.ts"
+### Community 6 - "jira-ticket.ts"
 Cohesion: 0.15
 Nodes (17): AgentToolDecision, EvidenceDecision, eligibleConversation(), AGENT_DECISION_ATTEMPT_TIMEOUT_MS, AGENT_DECISION_MAX_ATTEMPTS, AGENT_DECISION_TOTAL_TIMEOUT_MS, asTrimmedString(), evaluateEvidenceWithLlm() (+9 more)
 
@@ -136,7 +136,7 @@ Nodes (5): eslintConfig, eslint@^9, eslint-config-next@16.4.6, eslint, eslint-co
 Cohesion: 0.50
 Nodes (3): tailwindcss@^4, tailwindcss, config
 
-### Community 16 - "message-item.tsx"
+### Community 16 - "package.json"
 Cohesion: 0.17
 Nodes (16): ChatMessagesProps, ISSUE_TAGS, MessageActions(), MessageActionsProps, AgentActivityPanel(), AgentActivityRows(), EVIDENCE_DECISION_LABELS, FormattedContent() (+8 more)
 
@@ -152,15 +152,15 @@ Nodes (55): AccountSummary(), AccountSummaryProps, ChatContainer(), ChatContaine
 Cohesion: 0.53
 Nodes (5): buildBaselinePrompt(), buildEnterprisePolicyPrompt(), buildStrictCitationPrompt(), getSystemPrompt(), PromptVariant
 
-### Community 21 - "login/page.tsx"
+### Community 21 - "next-themes"
 Cohesion: 0.10
 Nodes (29): geistMono, geistSans, inter, metadata, RootLayout(), clearPendingDepartmentCookie(), completeDemoOnboarding(), getPendingDepartmentCookie() (+21 more)
 
-### Community 22 - "chat-input.ts"
+### Community 22 - "react-dom"
 Cohesion: 0.15
 Nodes (9): CAPABILITY_RESPONSE_WITH_JIRA, CAPABILITY_RESPONSE_WITHOUT_JIRA, ChatMessageInput, DeterministicIntent, getDeterministicResponse(), GREETING_RESPONSE, IDENTITY_RESPONSE_WITH_JIRA, IDENTITY_RESPONSE_WITHOUT_JIRA (+1 more)
 
-### Community 23 - "retrieve-chunks.ts"
+### Community 23 - "tw-animate-css@^1.4.0"
 Cohesion: 0.43
 Nodes (5): PERSONAL_SPARSE_STOPWORDS, RagChunk, retrieveVerifiedChunks(), toPersonalSparseQueryText(), withTimeout()
 
@@ -174,11 +174,11 @@ Nodes (12): clsx@^2.1.1, react-markdown@10.1.0, shadcn@^4.21.5, @supabase/supaba
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `react` connect `Project Dialogs and Controls` to `config.ts`, `dependencies`, `message-item.tsx`, `chat-container.tsx`, `login/page.tsx`, `package.json`?**
+- **Why does `react` connect `Project Dialogs and Controls` to `config.ts`, `dependencies`, `package.json`, `chat-container.tsx`, `next-themes`, `package.json`?**
   _High betweenness centrality (0.085) - this node is a cross-community bridge._
-- **Should `chat/route.ts` be split into smaller, more focused modules?**
+- **Should `app/page.tsx` be split into smaller, more focused modules?**
   _Cohesion score 0.13333333333333333 - nodes in this community are weakly interconnected._
-- **Why does `next` connect `Project Dialogs and Controls` to `next.config.ts`, `config.ts`, `dependencies`, `chat/route.ts`, `chat-container.tsx`, `login/page.tsx`, `package.json`?**
+- **Why does `next` connect `Project Dialogs and Controls` to `next.config.ts`, `config.ts`, `dependencies`, `chat/route.ts`, `chat-container.tsx`, `next-themes`, `package.json`?**
   _High betweenness centrality (0.049) - this node is a cross-community bridge._
 - **Should `Project Dialogs and Controls` be split into smaller, more focused modules?**
   _Cohesion score 0.059025394646533974 - nodes in this community are weakly interconnected._
