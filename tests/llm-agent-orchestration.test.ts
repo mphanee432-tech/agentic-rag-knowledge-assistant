@@ -1055,4 +1055,276 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
     assert.equal(body.metrics.agent.tool, "jira_create_denied")
     assert.equal(body.metrics.agent.retrieval_attempts, 0)
   })
+
+  await t.test("21. Incomplete stream before text emission recovers via bounded retry in Personal RAG", async (st) => {
+    const chunkId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    let streamCalls = 0
+    let interactionWrites = 0
+
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+      if (url.pathname.startsWith("/rest/v1/projects")) return Response.json([{ id: PROJECT_ID, user_id: "u1" }])
+      if (url.pathname === "/rest/v1/rpc/search_rag_chunks") return Response.json([{ id: chunkId }])
+      if (url.pathname === "/rest/v1/document_chunks") return Response.json([{ id: chunkId, content: "Backups run hourly.", metadata: {} }])
+      if (url.pathname === "/rest/v1/interactions") {
+        interactionWrites++
+        return Response.json([], { status: 201 })
+      }
+      if (url.hostname === "generativelanguage.googleapis.com") {
+        if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+        if (body.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "backup schedule" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (body.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+          })
+        }
+        streamCalls++
+        if (streamCalls === 1) {
+          const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+          return new Response(mid503, { headers: { "Content-Type": "text/event-stream" } })
+        }
+        const okFrame = `data: ${JSON.stringify({
+          candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Backups run hourly [Chunk 1]." }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 60, candidatesTokenCount: 10, totalTokenCount: 70 },
+        })}\n\n`
+        return new Response(okFrame, { headers: { "Content-Type": "text/event-stream" } })
+      }
+      assert.fail(`Unexpected URL: ${url.href}`)
+    })
+
+    const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: PROJECT_ID, query: "What is the backup schedule?", stream: true }),
+    }))
+    assert.equal(sseRes.status, 200)
+    const events: ChatEvent[] = []
+    await readChatStream(sseRes, (ev) => events.push(ev))
+    assert.equal(streamCalls, 2)
+    assert.equal(interactionWrites, 1)
+    assert.equal(events.filter((e) => e.type === "text").map((e) => e.text).join(""), "Backups run hourly [Chunk 1].")
+    const finish = events.find((e) => e.type === "finish")
+    assert.ok(finish && finish.type === "finish")
+    assert.equal((finish.metrics.retries as { generation: number }).generation, 1)
+  })
+
+  await t.test("22. Exhausted retry budget on persistent incomplete stream fails gracefully and logs sanitized production telemetry", async (st) => {
+    const prevNodeEnv = process.env.NODE_ENV
+    Object.assign(process.env, { NODE_ENV: "production" })
+    st.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
+
+    const logs: Array<Record<string, unknown>> = []
+    let logged!: () => void
+    const logDone = new Promise<void>((resolve) => { logged = resolve })
+    st.mock.method(console, "info", (val: string) => {
+      logs.push(JSON.parse(val))
+      logged()
+    })
+
+    const chunkId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    let streamCalls = 0
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+      if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
+      if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") return Response.json([{ id: chunkId, content: "SECRET_DOC_CONTENT_DO_NOT_LOG", metadata: {} }])
+      if (url.pathname === "/rest/v1/rpc/enterprise_fallback_documents") return Response.json([])
+      if (url.hostname === "generativelanguage.googleapis.com") {
+        if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+        if (body.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "onboarding" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (body.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "LEAK_GUARD_REASON", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+          })
+        }
+        streamCalls++
+        const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Buffered partial " }] } }] })}\n\n`
+        const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+        return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+      }
+      assert.fail(`Unexpected URL: ${url.href}`)
+    })
+
+    const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ organizationId: ORG_ID, query: "CONFIDENTIAL_QUERY_PROMPT", stream: true }),
+    }))
+    assert.equal(sseRes.status, 200)
+    const events: ChatEvent[] = []
+    await assert.rejects(readChatStream(sseRes, (ev) => events.push(ev)), /The answer could not be completed\. Please retry\./)
+    await logDone
+    assert.equal(streamCalls, 2)
+    assert.equal(events.some((e) => e.type === "text" || e.type === "finish"), false)
+    assert.equal(logs.length, 1)
+    assert.equal(logs[0].status, "error")
+    assert.equal(logs[0].failure_stage, "answer_validation")
+    assert.equal(logs[0].failure_category, "generation_incomplete")
+    assert.equal(logs[0].model_id, "gemini-3.5-flash-lite")
+    assert.equal(logs[0].model_finish_reason, "other")
+    assert.equal(logs[0].provider_error_status, null)
+    assert.equal((logs[0].retries as { generation: number }).generation, 1)
+    assert.match(String(logs[0].interaction_id), /^[0-9a-f-]{36}$/i)
+    const serialized = JSON.stringify(logs[0])
+    for (const secret of ["CONFIDENTIAL_QUERY_PROMPT", "SECRET_DOC_CONTENT_DO_NOT_LOG", "LEAK_GUARD_REASON", "test-google-key", "sb_secret"]) {
+      assert.equal(serialized.includes(secret), false, `Must not log ${secret}`)
+    }
+  })
+
+  await t.test("23. Personal partial-stream incomplete error never retries or replays partial output", async (st) => {
+    const prevNodeEnv = process.env.NODE_ENV
+    Object.assign(process.env, { NODE_ENV: "production" })
+    st.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
+
+    const logs: Array<Record<string, unknown>> = []
+    let logged!: () => void
+    const logDone = new Promise<void>((resolve) => { logged = resolve })
+    st.mock.method(console, "info", (val: string) => {
+      logs.push(JSON.parse(val))
+      logged()
+    })
+
+    const chunkId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    let streamCalls = 0
+    let interactionWrites = 0
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+      if (url.pathname.startsWith("/rest/v1/projects")) return Response.json([{ id: PROJECT_ID, user_id: "u1" }])
+      if (url.pathname === "/rest/v1/rpc/search_rag_chunks") return Response.json([{ id: chunkId }])
+      if (url.pathname === "/rest/v1/document_chunks") return Response.json([{ id: chunkId, content: "Retention period is 30 days.", metadata: {} }])
+      if (url.pathname === "/rest/v1/interactions") {
+        interactionWrites++
+        return Response.json([], { status: 201 })
+      }
+      if (url.hostname === "generativelanguage.googleapis.com") {
+        if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+        if (body.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "retention period" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (body.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+          })
+        }
+        streamCalls++
+        const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Retention period " }] } }] })}\n\n`
+        const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+        return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+      }
+      assert.fail(`Unexpected URL: ${url.href}`)
+    })
+
+    const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: PROJECT_ID, query: "What is the retention period?", stream: true }),
+    }))
+    assert.equal(sseRes.status, 200)
+    const events: ChatEvent[] = []
+    await assert.rejects(readChatStream(sseRes, (ev) => events.push(ev)), /The answer could not be completed\. Please retry\./)
+    await logDone
+    assert.equal(streamCalls, 1)
+    assert.equal(interactionWrites, 0)
+    assert.equal(events.filter((e) => e.type === "text").map((e) => e.text).join(""), "Retention period ")
+    assert.equal((logs[0].retries as { generation: number }).generation, 0)
+    assert.equal(logs[0].model_finish_reason, "other")
+    assert.equal(logs[0].provider_error_status, null)
+  })
+
+  await t.test("24. Enterprise buffered incomplete-stream recovery preserves citation validation, visibility recheck, and silent prod success logging", async (st) => {
+    for (const visibleOnRecheck of [true, false]) {
+      await st.test(`visible=${visibleOnRecheck}`, async (sst) => {
+        const prevNodeEnv = process.env.NODE_ENV
+        Object.assign(process.env, { NODE_ENV: "production" })
+        sst.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
+
+        const logs: Array<Record<string, unknown>> = []
+        sst.mock.method(console, "info", (val: string) => { logs.push(JSON.parse(val)) })
+
+        const chunk1 = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        const chunk2 = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        let streamCalls = 0
+        let visibilityChecks = 0
+
+        sst.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+          if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
+          if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
+            return Response.json([
+              { id: chunk1, content: "Employees get 20 annual leave days.", metadata: { title: "Leave Policy" } },
+              { id: chunk2, content: "Unrelated equipment clause.", metadata: { title: "Equipment Policy" } },
+            ])
+          }
+          if (url.pathname === "/rest/v1/rpc/enterprise_chunks_still_visible") {
+            visibilityChecks++
+            return Response.json(visibleOnRecheck)
+          }
+          if (url.pathname === "/rest/v1/rpc/enterprise_fallback_documents") return Response.json([])
+          if (url.hostname === "generativelanguage.googleapis.com") {
+            if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+            const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+            if (body.tools) {
+              return Response.json({
+                candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "annual leave" } } }] }, finishReason: "STOP" }],
+              })
+            }
+            if (body.generationConfig?.responseJsonSchema) {
+              return Response.json({
+                candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+              })
+            }
+            streamCalls++
+            if (streamCalls === 1) {
+              const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Employees get " }] } }] })}\n\n`
+              const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+              return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+            }
+            const ok = `data: ${JSON.stringify({
+              candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Employees receive 20 annual leave days [Chunk 1]." }] }, finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 14, totalTokenCount: 114 },
+            })}\n\n`
+            return new Response(ok, { headers: { "Content-Type": "text/event-stream" } })
+          }
+          assert.fail(`Unexpected URL: ${url.href}`)
+        })
+
+        const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+          method: "POST",
+          headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+          body: JSON.stringify({ organizationId: ORG_ID, query: "What is the annual leave policy?", stream: true }),
+        }))
+        assert.equal(sseRes.status, 200)
+        const events: ChatEvent[] = []
+        await readChatStream(sseRes, (ev) => events.push(ev))
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        assert.equal(streamCalls, 2)
+        assert.equal(visibilityChecks, 1)
+        const emitted = events.filter((e) => e.type === "text").map((e) => e.text).join("")
+        assert.equal(emitted, visibleOnRecheck ? "Employees receive 20 annual leave days [Chunk 1]." : ENTERPRISE_NO_EVIDENCE)
+        const meta = events.find((e) => e.type === "metadata")
+        assert.ok(meta && meta.type === "metadata")
+        assert.deepEqual(meta.citations.map((c) => c.id), visibleOnRecheck ? [chunk1] : [])
+        const finish = events.find((e) => e.type === "finish")
+        assert.ok(finish && finish.type === "finish")
+        assert.equal((finish.metrics.retries as { generation: number }).generation, 1)
+        assert.equal(logs.length, 0, "Production should not emit failure telemetry on successful requests")
+      })
+    }
+  })
 })

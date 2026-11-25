@@ -12,9 +12,9 @@
     "semantic_hash": ""
   },
   "app/api/chat/route.ts": {
-    "mtime": 1795608974.2701411,
-    "seen": 1795609660.6356509,
-    "ast_hash": "74272e7ba1e4536d427a564606f79d42",
+    "mtime": 1795618436.8668723,
+    "seen": 1795618651.0959735,
+    "ast_hash": "33724cdee611e88704e1864f6c225f3d",
     "semantic_hash": ""
   },
   "app/api/documents/route.ts": {
@@ -108,14 +108,14 @@
     "semantic_hash": ""
   },
   "components/chat/message-actions.tsx": {
-    "mtime": 1795608919.4614725,
-    "seen": 1795609660.635851,
+    "mtime": 1795611652.2795248,
+    "seen": 1795618651.0966113,
     "ast_hash": "2145b3a2f736fe5105eedd54cfc2c600",
     "semantic_hash": ""
   },
   "components/chat/message-item.tsx": {
-    "mtime": 1795608912.7965083,
-    "seen": 1795609660.6358554,
+    "mtime": 1795611652.2805269,
+    "seen": 1795618651.0966554,
     "ast_hash": "5ec217d5065ef1a7559fa92a0dae6a94",
     "semantic_hash": ""
   },
@@ -222,8 +222,8 @@
     "semantic_hash": ""
   },
   "lib/chat-contract.ts": {
-    "mtime": 1795608904.8974233,
-    "seen": 1795609660.6360037,
+    "mtime": 1795611652.3643,
+    "seen": 1795618651.097088,
     "ast_hash": "412397f0d1a3dd4f775a24a81efad74c",
     "semantic_hash": ""
   },
@@ -246,8 +246,8 @@
     "semantic_hash": ""
   },
   "lib/send-chat.ts": {
-    "mtime": 1795608908.4331255,
-    "seen": 1795609660.6360812,
+    "mtime": 1795611652.3678277,
+    "seen": 1795618651.0973558,
     "ast_hash": "ac4d0e3e35dfceb0c959a56934fd7ece",
     "semantic_hash": ""
   },
@@ -474,9 +474,9 @@
     "semantic_hash": ""
   },
   "lib/gemini-ingestion-retry.ts": {
-    "mtime": 1795582515.7355206,
-    "seen": 1795609660.6360426,
-    "ast_hash": "ca71d9634ba0e42ac01c7490b5ccccab",
+    "mtime": 1795618438.5639946,
+    "seen": 1795618651.0972176,
+    "ast_hash": "42a7b1f845d2d17f88df24ca1b819364",
     "semantic_hash": ""
   },
   "lib/enterprise-upload.ts": {
@@ -486,8 +486,8 @@
     "semantic_hash": ""
   },
   "lib/agent-loop.ts": {
-    "mtime": 1795608899.93294,
-    "seen": 1795609660.6359942,
+    "mtime": 1795611652.3643,
+    "seen": 1795618651.097054,
     "ast_hash": "67c52b0c2e966927b8c3562da798bd64",
     "semantic_hash": ""
   },
@@ -498,8 +498,8 @@
     "semantic_hash": ""
   },
   "lib/llm-agent.ts": {
-    "mtime": 1795608930.9706616,
-    "seen": 1795609660.6360629,
+    "mtime": 1795611652.3668294,
+    "seen": 1795618651.0972877,
     "ast_hash": "730a7fa803217f6b082685b4eba7022e",
     "semantic_hash": ""
   },
