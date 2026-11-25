@@ -93,9 +93,9 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
     assert.equal(getDeterministicResponse("greeting", false), "Hello! How can I help you?")
   })
 
-  await t.test("Jira status route enforces org membership and ECD-only allowlist", async st => {
+  await t.test("Jira status route enforces org membership and ECD/KAN allowlist", async st => {
     let webhookCalls = 0
-    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") return Response.json({ id: "user-1", role: "authenticated" })
       if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") {
@@ -103,17 +103,27 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
       }
       if (url.hostname === "jira-status.invalid") {
         webhookCalls++
-        return Response.json({ success: true, ticketKey: "ECD-6", status: "In Progress", summary: "Verify upload" })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { issueKey?: string }
+        const ticketKey = body.issueKey ?? "ECD-6"
+        return Response.json({
+          success: true,
+          ticketKey,
+          status: ticketKey === "KAN-1" ? "Idea" : "In Progress",
+          summary: "Verify upload",
+        })
       }
       assert.fail(`Unexpected URL: ${url.href}`)
     })
 
-    const deniedKan = await jiraStatusPost(new Request("https://app.invalid/api/jira/status", {
+    const deniedOther = await jiraStatusPost(new Request("https://app.invalid/api/jira/status", {
       method: "POST",
       headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
-      body: JSON.stringify({ organizationId: ORG_ID, issueKey: "KAN-1" }),
+      body: JSON.stringify({ organizationId: ORG_ID, issueKey: "SEC-1" }),
     }))
-    assert.equal(deniedKan.status, 403)
+    assert.equal(deniedOther.status, 403)
+    assert.deepEqual(await deniedOther.json(), {
+      error: "Only ECD and KAN project Jira tickets are accessible in this demo.",
+    })
     assert.equal(webhookCalls, 0)
 
     const allowedEcd = await jiraStatusPost(new Request("https://app.invalid/api/jira/status", {
@@ -123,6 +133,14 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
     }))
     assert.equal(allowedEcd.status, 200)
     assert.equal(webhookCalls, 1)
+
+    const allowedKan = await jiraStatusPost(new Request("https://app.invalid/api/jira/status", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ organizationId: ORG_ID, issueKey: "KAN-1" }),
+    }))
+    assert.equal(allowedKan.status, 200)
+    assert.equal(webhookCalls, 2)
   })
 
   await t.test("Jira ticket creation enforces allowlist and explicit UI confirmation before POST /api/jira/create", async st => {
@@ -408,7 +426,14 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
       }
       if (url.hostname === "jira-status.invalid") {
         statusWebhookCalls++
-        return Response.json({ success: true, ticketKey: "ECD-6", status: "In Progress", summary: "VPN disconnects" })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { issueKey?: string }
+        const ticketKey = body.issueKey ?? "ECD-6"
+        return Response.json({
+          success: true,
+          ticketKey,
+          status: ticketKey === "KAN-1" ? "Idea" : "In Progress",
+          summary: "VPN disconnects",
+        })
       }
       assert.fail(`No embedding or retrieval call expected for jira_status: ${url.href}`)
     })
@@ -443,7 +468,7 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
     }))
     assert.equal(clarificationRes.status, 200)
     const clarificationBody = await clarificationRes.json()
-    assert.match(clarificationBody.text, /Please share the Jira ticket ID/i)
+    assert.match(clarificationBody.text, /Please share the Jira ticket ID \(for example, ECD-6 or KAN-1\)/i)
     assert.equal(clarificationBody.metrics.agent.tool, "jira_status_clarification")
     assert.equal(statusWebhookCalls, 2)
 
@@ -463,12 +488,28 @@ test("Step 5 Agentic Eval: tool selection, confirmation gate, recovery retry, an
     assert.equal(keylessWithLastBody.metrics.agent.tool, "jira_status")
     assert.equal(statusWebhookCalls, 3)
 
+    const keylessWithKanLastRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        organizationId: ORG_ID,
+        query: "What is the status of my ticket?",
+        lastJiraTicketKey: "kan-1",
+        stream: false,
+      }),
+    }))
+    assert.equal(keylessWithKanLastRes.status, 200)
+    const keylessWithKanLastBody = await keylessWithKanLastRes.json()
+    assert.equal(keylessWithKanLastBody.text, "**KAN-1 — Idea**\n\nSummary: VPN disconnects")
+    assert.equal(keylessWithKanLastBody.metrics.agent.tool, "jira_status")
+    assert.equal(statusWebhookCalls, 4)
+
     const deniedRes = await chatPost(new Request("https://app.invalid/api/chat", {
       method: "POST",
       headers: { Authorization: "Bearer tok", "Content-Type": "application/json" },
       body: JSON.stringify({ organizationId: ORG_ID, query: "What is the current status of ABC-42?", stream: false }),
     }))
     assert.equal(deniedRes.status, 403)
-    assert.equal(statusWebhookCalls, 3)
+    assert.equal(statusWebhookCalls, 4)
   })
 })

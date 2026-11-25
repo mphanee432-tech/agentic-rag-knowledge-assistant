@@ -1,7 +1,7 @@
 import { getEnterpriseCopilotContext, HttpError } from "@/lib/auth"
 import {
+  ALLOWED_JIRA_PROJECT_KEYS_LABEL,
   JIRA_ALLOWED_ISSUE_KEY_PATTERN,
-  JIRA_DEMO_PROJECT_KEY,
   JIRA_ISSUE_KEY_PATTERN,
   type JiraStatusResult,
 } from "@/lib/jira-ticket"
@@ -11,7 +11,7 @@ type SupabaseClient = Awaited<ReturnType<typeof createClient>>
 
 /**
  * Shared read-only Jira issue status lookup enforcing active organization membership,
- * ECD demo project allowlist, and verified Activepieces webhook response shape.
+ * the ALLOWED_JIRA_PROJECTS allowlist, and verified Activepieces webhook response shape.
  */
 export async function lookupEnterpriseJiraStatus(params: {
   supabase: SupabaseClient
@@ -31,7 +31,7 @@ export async function lookupEnterpriseJiraStatus(params: {
     throw new HttpError(403, "Active membership in this organization is required.")
   }
   if (!JIRA_ALLOWED_ISSUE_KEY_PATTERN.test(issueKey)) {
-    throw new HttpError(403, `Only ${JIRA_DEMO_PROJECT_KEY} project Jira tickets are accessible in this demo.`)
+    throw new HttpError(403, `Only ${ALLOWED_JIRA_PROJECT_KEYS_LABEL} project Jira tickets are accessible in this demo.`)
   }
 
   const configuredUrl = process.env.ACTIVEPIECES_JIRA_STATUS_WEBHOOK_URL?.trim() ?? ""

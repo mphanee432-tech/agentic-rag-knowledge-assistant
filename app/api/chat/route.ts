@@ -7,6 +7,7 @@ import { assertValidAnswer, encodeEvent, ENTERPRISE_NO_EVIDENCE, isNoEvidenceAns
 import { getSystemPrompt } from '@/lib/prompts/systemPrompt';
 
 import {
+  requestsPermissionChange,
   getDeterministicIntent,
   getDeterministicResponse,
   parseChatInput,
@@ -234,7 +235,10 @@ export async function POST(req: Request) {
     let decisionMode: 'llm' | 'deterministic' = 'deterministic';
     let toolSelectionMs = 0;
 
-    if (exactDeterministicIntent) {
+    const permissionChange = requestsPermissionChange(userQuery);
+    if (permissionChange) {
+      toolDecision = { tool: 'deterministic_reply', intent: 'permission_refusal', requiresConfirmation: false };
+    } else if (exactDeterministicIntent) {
       toolDecision = { tool: 'deterministic_reply', intent: exactDeterministicIntent, requiresConfirmation: false };
     } else {
       stage = 'agent_decision';
@@ -335,10 +339,12 @@ export async function POST(req: Request) {
 
     if (toolDecision.tool === 'deterministic_reply') {
       const deterministicIntent = toolDecision.intent;
-      const jiraEnabled = deterministicIntent === 'greeting'
+      const jiraEnabled = deterministicIntent === 'greeting' || permissionChange
         ? false
         : await getJiraAccess();
-      const deterministicResponse = getDeterministicResponse(deterministicIntent, jiraEnabled);
+      const deterministicResponse = deterministicIntent === 'permission_refusal'
+        ? (enterprise ? ENTERPRISE_NO_EVIDENCE : NO_EVIDENCE)
+        : getDeterministicResponse(deterministicIntent, jiraEnabled);
       return respondDirectToolReply(deterministicResponse, {
         tool: 'deterministic_reply',
         steps: 2,
@@ -346,8 +352,8 @@ export async function POST(req: Request) {
         retrieval_attempts: 0,
         max_retrieval_attempts: MAX_RETRIEVAL_ATTEMPTS,
         reformulated: false,
-        evidence_sufficient: true,
-        evidence_reason: 'deterministic_short_circuit',
+        evidence_sufficient: !permissionChange,
+        evidence_reason: permissionChange ? 'permission_change_refused' : 'deterministic_short_circuit',
         decision_mode: decisionMode,
         next_action: 'tool_executed',
         decision_tokens: decisionTokens,

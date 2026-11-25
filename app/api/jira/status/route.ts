@@ -4,7 +4,7 @@ import { lookupEnterpriseJiraStatus } from "@/lib/jira-status"
 /**
  * MVP demo authorization boundary:
  * Verifies Supabase user session, active enterprise organization membership via
- * `enterprise_copilot_context`, and restricts lookups to the `ECD` demo Jira project.
+ * `enterprise_copilot_context`, and restricts lookups to `ALLOWED_JIRA_PROJECTS` (`ECD` and `KAN`).
  * Document RLS does not secure external Jira issues.
  */
 export async function POST(req: Request) {

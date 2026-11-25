@@ -2,9 +2,6 @@ export const JIRA_SUMMARY_MAX = 255
 export const JIRA_DESCRIPTION_MAX = 10_000
 export const JIRA_DEMO_PROJECT_KEY = "ECD"
 export const JIRA_ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]*-[1-9]\d*$/
-export const JIRA_ALLOWED_ISSUE_KEY_PATTERN = /^ECD-[1-9]\d*$/
-export const JIRA_STATUS_CLARIFICATION_PROMPT =
-  "Please share the Jira ticket ID (for example, ECD-6) so I can check its status."
 const JIRA_LAST_TICKET_STORAGE_PREFIX = "jira:last-ticket:"
 
 export interface JiraProjectOption {
@@ -51,6 +48,32 @@ export const ALLOWED_JIRA_PROJECTS: readonly JiraProjectOption[] = [
 ]
 
 export const DEFAULT_JIRA_PROJECT_ID = "10001"
+
+const JIRA_EXAMPLE_ISSUE_NUMBERS: Readonly<Record<string, number>> = { ECD: 6 }
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function formatKeyList(items: readonly string[], conjunction: "and" | "or"): string {
+  if (items.length === 0) return ""
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]} ${conjunction} ${items[1]}`
+  return `${items.slice(0, -1).join(", ")}, ${conjunction} ${items[items.length - 1]}`
+}
+
+export const ALLOWED_JIRA_PROJECT_KEYS: readonly string[] = ALLOWED_JIRA_PROJECTS.map((project) => project.key)
+
+export const ALLOWED_JIRA_PROJECT_KEYS_LABEL = formatKeyList(ALLOWED_JIRA_PROJECT_KEYS, "and")
+
+export const JIRA_ALLOWED_ISSUE_KEY_PATTERN = new RegExp(
+  `^(?:${ALLOWED_JIRA_PROJECT_KEYS.map(escapeRegex).join("|")})-[1-9]\\d*$`,
+)
+
+export const JIRA_STATUS_CLARIFICATION_PROMPT = `Please share the Jira ticket ID (for example, ${formatKeyList(
+  ALLOWED_JIRA_PROJECT_KEYS.map((key) => `${key}-${JIRA_EXAMPLE_ISSUE_NUMBERS[key] ?? 1}`),
+  "or",
+)}) so I can check its status.`
 
 export function getAllowedJiraProject(projectId: unknown): JiraProjectOption | null {
   if (typeof projectId !== "string") return null

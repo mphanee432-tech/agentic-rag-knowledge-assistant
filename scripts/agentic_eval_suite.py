@@ -395,28 +395,12 @@ def is_identity_eligible(
         return False, "Skipped: Enterprise user credential/token unavailable in local env."
     ctx = case["required_permission_context"]
     req_grants = set(ctx.get("grants") or [])
-    if not req_grants.issubset(enterprise_grants):
-        return False, "Skipped: required Enterprise document grant not present on available test identity."
-    if ctx.get("project_membership") and ctx.get("project_id") not in enterprise_projects:
-        return False, "Skipped: required Enterprise project membership not present on available test identity."
-    req_dept = ctx.get("department")
-    if (
-        case["expected_behavior"] == "answer"
-        and req_dept
-        and req_dept != enterprise_dept
-        and case["category"] == "department_policy"
-    ):
-        return False, f"Skipped: requires '{req_dept}' department membership (active test identity is '{enterprise_dept}')."
-    if req_role := ctx.get("role"):
-        if req_role == "cxo" and enterprise_role != "cxo":
-            return False, f"Skipped: requires CXO role (active test identity is '{enterprise_role}')."
-    if (
-        enterprise_role == "cxo"
-        and case["expected_behavior"] in DENIAL_OR_REFUSE_BEHAVIORS
-        and case["category"] in SECURITY_DENIAL_CATEGORIES
-        and ctx.get("role") != "cxo"
-    ):
-        return False, "Skipped: restricted-document denial test cannot run under CXO identity with all-document access."
+    if req_grants != enterprise_grants:
+        return False, "Skipped: active document grants differ from the required context."
+    if bool(ctx.get("project_membership")) != bool(enterprise_projects):
+        return False, "Skipped: active project membership differs from the required context."
+    if ctx.get("department") != enterprise_dept or role != enterprise_role:
+        return False, "Skipped: verified department or role differs from the required context."
     return True, ""
 
 
@@ -1169,6 +1153,7 @@ def evaluate_case_with_gemini_judge(
     api_key: str,
     judge_model: str = DEFAULT_JUDGE_MODEL,
     stream_error: Optional[str] = None,
+    fallback_questions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     excluded, reason = is_judge_excluded_case(case, status_code, text, stream_error)
     if excluded:
@@ -1183,6 +1168,11 @@ def evaluate_case_with_gemini_judge(
 
     authorized_evidence = build_authorized_evidence(eval_context, citations)
     has_evidence = bool(authorized_evidence)
+    normalized_fallback_questions = [
+        q.strip()
+        for q in (fallback_questions or [])
+        if isinstance(q, str) and q.strip()
+    ]
 
     evidence_instruction = (
         "Authorized evidence IS provided below. Score faithfulness_score (1..5), unsupported_claims_score (1..5, where 5=no unsupported claims, 1=many unsupported claims), and unsupported_claims_count (int >= 0) strictly against authorized_evidence ONLY."
@@ -1208,6 +1198,8 @@ def evaluate_case_with_gemini_judge(
         "assistant_answer": text,
         "authorized_evidence_available": has_evidence,
     }
+    if normalized_fallback_questions:
+        prompt_payload["fallback_questions"] = normalized_fallback_questions
     if has_evidence:
         prompt_payload["authorized_evidence"] = authorized_evidence
 
@@ -1437,6 +1429,65 @@ def sign_in_supabase(base_url: str, public_key: str, email: str, password: str) 
     return resp.json()["access_token"]
 
 
+def verified_enterprise_context(token: str, organization: str) -> dict:
+    """Resolve the bearer subject with Auth and inspect only that subject's prerequisites."""
+    url = os.environ["NEXT_PUBLIC_ENTERPRISE_SUPABASE_URL"].rstrip("/")
+    public = os.getenv("NEXT_PUBLIC_ENTERPRISE_SUPABASE_PUBLISHABLE_KEY") or os.environ["NEXT_PUBLIC_ENTERPRISE_SUPABASE_ANON_KEY"]
+    admin = os.environ["ENTERPRISE_SUPABASE_SECRET_KEY"]
+    def get(path, key, bearer, params=None):
+        response = requests.get(url + path, headers={"apikey": key, "Authorization": "Bearer " + bearer},
+                                params=params, timeout=10, allow_redirects=False)
+        response.raise_for_status()
+        return response.json()
+
+    uid = get("/auth/v1/user", public, token)["id"]
+    scope = {"organization_id": "eq." + organization, "user_id": "eq." + uid}
+    staff, = get("/rest/v1/organization_employees", admin, admin,
+                 {**scope, "is_active": "eq.true", "select": "role,department_id"})
+    department, = get("/rest/v1/departments", admin, admin, {"organization_id": scope["organization_id"],
+                        "id": "eq." + staff["department_id"], "select": "name"})
+    active = {**scope, "valid_from": "lte.now", "expires_at": "gt.now", "revoked_at": "is.null"}
+    grants = get("/rest/v1/document_grants", admin, admin,
+                 {**active, "approved_by": "not.is.null", "select": "document_id"})
+    projects = get("/rest/v1/project_memberships", admin, admin, {**active, "select": "project_id,is_d12"})
+    return {"organization": organization, "user_id": uid, "role": staff["role"], "department": department["name"],
+            "grants": sorted(row["document_id"] for row in grants),
+            "projects": sorted(row["project_id"] for row in projects),
+            "d12_membership": any(row["is_d12"] for row in projects)}
+
+
+def verified_case_eligibility(case, identity):
+    if not identity or identity.get("organization") != case["required_permission_context"]["project_id"]:
+        return False, "Skipped: no verified identity for the required organization."
+    if case["required_permission_context"].get("project_membership") and not identity["d12_membership"]:
+        return False, "Skipped: missing active launch project membership."
+    return is_identity_eligible(case, identity["department"], identity["role"], set(identity["grants"]),
+                                set(identity["projects"]), False, True)
+
+
+def _build_not_run_record(case: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    return {
+        "case_id": case["case_id"],
+        "workspace": case["workspace"],
+        "category": case["category"],
+        "expected_behavior": case["expected_behavior"],
+        "dataset_grounding_valid": True,
+        "v1_comparable": bool(case.get("v1_comparable", False)),
+        "live_execution_status": "NOT_RUN",
+        "task_check_passed": None,
+        "failure_category": None,
+        "retrieval_recall_at_8": None,
+        "retrieval_precision_at_8": None,
+        "retrieval_mrr": None,
+        "retrieval_metrics_status": "NOT_RUN",
+        "cited_precision": None,
+        "zero_unauthorized_chunks_exposed": None,
+        "access_denial_correct": None,
+        **default_judge_fields(),
+        "notes": reason,
+    }
+
+
 def run_live(
     cases: List[Dict[str, Any]],
     endpoint: str,
@@ -1503,9 +1554,19 @@ def run_live(
             os.environ["EVAL_ENTERPRISE_PASSWORD"],
         )
 
-    ent_grants = enterprise_grants or set()
-    ent_projects = enterprise_projects or set()
-    by_id: Dict[str, Dict[str, Any]] = dict(existing_results or {})
+    by_id: Dict[str, Dict[str, Any]] = {}
+    cases_by_id = {c["case_id"]: c for c in cases}
+    for cid, prev in (existing_results or {}).items():
+        case = cases_by_id.get(cid)
+        if not case:
+            continue
+        if case["workspace"] == "enterprise" and str(prev.get("live_execution_status", "")).startswith("HTTP_"):
+            valid, reason = verified_case_eligibility(case, prev.get("verified_identity"))
+            if not valid:
+                by_id[cid] = _build_not_run_record(case, reason)
+                continue
+        by_id[cid] = dict(prev)
+    verified_context_by_org: Dict[str, Optional[Dict[str, Any]]] = {}
     executed_count = 0
     consecutive_api_errors = 0
     aborted_reason: Optional[str] = None
@@ -1531,59 +1592,26 @@ def run_live(
                 continue
 
             ws = case["workspace"]
-            eligible, skip_reason = is_identity_eligible(
-                case,
-                enterprise_dept=enterprise_dept,
-                enterprise_role=enterprise_role,
-                enterprise_grants=ent_grants,
-                enterprise_projects=ent_projects,
-                personal_available=bool(personal_token),
-                enterprise_available=bool(enterprise_token),
-            )
+            identity = None
+            if ws == "enterprise":
+                org_id = case["required_permission_context"]["project_id"]
+                try:
+                    if enterprise_token:
+                        if org_id not in verified_context_by_org:
+                            verified_context_by_org[org_id] = verified_enterprise_context(enterprise_token, org_id)
+                        identity = verified_context_by_org[org_id]
+                    eligible, skip_reason = verified_case_eligibility(case, identity)
+                except (requests.RequestException, ValueError, TypeError, KeyError):
+                    verified_context_by_org[org_id] = None
+                    eligible, skip_reason = False, "Skipped: could not verify Enterprise prerequisites."
+            else:
+                eligible, skip_reason = is_identity_eligible(case, "", "", set(), set(), bool(personal_token), False)
             if not eligible:
-                by_id[cid] = {
-                    "case_id": cid,
-                    "workspace": ws,
-                    "category": case["category"],
-                    "expected_behavior": case["expected_behavior"],
-                    "dataset_grounding_valid": True,
-                    "v1_comparable": bool(case.get("v1_comparable", False)),
-                    "live_execution_status": "NOT_RUN",
-                    "task_check_passed": None,
-                    "failure_category": None,
-                    "retrieval_recall_at_8": None,
-                    "retrieval_precision_at_8": None,
-                    "retrieval_mrr": None,
-                    "retrieval_metrics_status": "NOT_RUN",
-                    "cited_precision": None,
-                    "zero_unauthorized_chunks_exposed": None,
-                    "access_denial_correct": None,
-                    **default_judge_fields(),
-                    "notes": skip_reason,
-                }
+                by_id[cid] = _build_not_run_record(case, skip_reason)
                 continue
 
             if max_cases is not None and executed_count >= max_cases:
-                by_id[cid] = {
-                    "case_id": cid,
-                    "workspace": ws,
-                    "category": case["category"],
-                    "expected_behavior": case["expected_behavior"],
-                    "dataset_grounding_valid": True,
-                    "v1_comparable": bool(case.get("v1_comparable", False)),
-                    "live_execution_status": "NOT_RUN",
-                    "task_check_passed": None,
-                    "failure_category": None,
-                    "retrieval_recall_at_8": None,
-                    "retrieval_precision_at_8": None,
-                    "retrieval_mrr": None,
-                    "retrieval_metrics_status": "NOT_RUN",
-                    "cited_precision": None,
-                    "zero_unauthorized_chunks_exposed": None,
-                    "access_denial_correct": None,
-                    **default_judge_fields(),
-                    "notes": f"Skipped: reached bounded max_cases={max_cases}.",
-                }
+                by_id[cid] = _build_not_run_record(case, f"Skipped: reached bounded max_cases={max_cases}.")
                 continue
 
             quota_stop_reason = active_pacer.before_case(
@@ -1627,11 +1655,15 @@ def run_live(
             eval_context = ""
             stream_error: Optional[str] = None
             parsed_sse: Dict[str, Any] = {}
+            fallback_questions: List[str] = []
             if resp.status_code == 200 and "text/event-stream" in ctype:
                 parsed_sse = parse_sse_response(resp, started_at)
                 text = parsed_sse["text"]
                 citations = parsed_sse["citations"]
                 metrics = parsed_sse["metrics"]
+                fallback_questions = [
+                    q for q in (parsed_sse.get("fallbackQuestions") or []) if isinstance(q, str) and q.strip()
+                ]
                 eval_context = parsed_sse.get("context") or ""
                 client_ttft_ms = parsed_sse["client_ttft_ms"]
                 client_total_ms = parsed_sse["client_total_ms"]
@@ -1641,6 +1673,9 @@ def run_live(
                 text = body.get("text", "")
                 citations = body.get("citations", [])
                 metrics = body.get("metrics", {})
+                raw_fallback = body.get("fallbackQuestions")
+                if isinstance(raw_fallback, list):
+                    fallback_questions = [q for q in raw_fallback if isinstance(q, str) and q.strip()]
                 eval_context = body.get("context", "") if isinstance(body.get("context"), str) else ""
 
             retrieved_ids = [c.get("id") for c in citations if isinstance(c, dict) and c.get("id")]
@@ -1667,6 +1702,7 @@ def run_live(
                     api_key=gemini_api_key,
                     judge_model=resolved_judge_model or DEFAULT_JUDGE_MODEL,
                     stream_error=stream_error,
+                    fallback_questions=fallback_questions,
                 )
                 if judge
                 else default_judge_fields()
@@ -1731,6 +1767,7 @@ def run_live(
                 )
 
             by_id[cid] = {
+                "verified_identity": identity,
                 "case_id": cid,
                 "workspace": ws,
                 "category": case["category"],
@@ -1763,7 +1800,7 @@ def run_live(
                     for c in citations
                     if isinstance(c, dict)
                 ],
-                "fallback_questions": parsed_sse.get("fallbackQuestions", []),
+                "fallback_questions": fallback_questions,
                 "notes": stream_error or "",
             }
             if daily_exhausted:

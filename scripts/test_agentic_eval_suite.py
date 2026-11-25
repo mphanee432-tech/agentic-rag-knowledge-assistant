@@ -65,7 +65,7 @@ class AgenticEvalSuiteTests(unittest.TestCase):
     def test_identity_eligibility_marks_unavailable_grants_and_foreign_dept_not_run(self):
         dataset = Path(__file__).resolve().parents[1] / "evals/agentic_eval_40.jsonl"
         cases = {c["case_id"]: c for c in suite.load_eval_dataset(dataset)}
-        self.assertTrue(suite.is_identity_eligible(cases["E01"], "Engineering", "manager", set(), set(), True, True)[0])
+        self.assertFalse(suite.is_identity_eligible(cases["E01"], "Engineering", "manager", set(), set(), True, True)[0])
         self.assertTrue(suite.is_identity_eligible(cases["E07"], "Engineering", "manager", set(), set(), True, True)[0])
         self.assertTrue(suite.is_identity_eligible(cases["E10"], "Engineering", "manager", set(), set(), True, True)[0])
         self.assertTrue(suite.is_identity_eligible(cases["E15"], "Engineering", "manager", set(), set(), True, True)[0])
@@ -78,8 +78,8 @@ class AgenticEvalSuiteTests(unittest.TestCase):
         self.assertFalse(suite.is_identity_eligible(cases["E11"], "Engineering", "cxo", set(), set(), True, True)[0])
         self.assertFalse(suite.is_identity_eligible(cases["E15"], "Engineering", "cxo", set(), set(), True, True)[0])
         self.assertFalse(suite.is_identity_eligible(cases["E21"], "Engineering", "cxo", set(), set(), True, True)[0])
-        self.assertTrue(suite.is_identity_eligible(cases["E01"], "Engineering", "cxo", set(), set(), True, True)[0])
-        self.assertTrue(suite.is_identity_eligible(cases["E22"], "Engineering", "cxo", set(), set(), True, True)[0])
+        self.assertFalse(suite.is_identity_eligible(cases["E01"], "Engineering", "cxo", set(), set(), True, True)[0])
+        self.assertFalse(suite.is_identity_eligible(cases["E22"], "Engineering", "cxo", set(), set(), True, True)[0])
 
     def test_sse_stream_parser_preserves_multibyte_utf8_across_1byte_chunks(self):
         frames = [
@@ -268,6 +268,12 @@ class AgenticEvalSuiteTests(unittest.TestCase):
                 return FakeStreamResponse(sse_personal)
             return FakeStreamResponse(sse_enterprise)
 
+        identity = dict(organization=cases_list[-1]["required_permission_context"]["project_id"], department="Engineering",
+                        role="employee", grants=[], projects=[], d12_membership=False)
+        identity["organization"] = next(c for c in cases_list if c["workspace"] == "enterprise")["required_permission_context"]["project_id"]
+        verification = patch.object(suite, "verified_enterprise_context", return_value=identity)
+        verification.start()
+        self.addCleanup(verification.stop)
         secret_key = "AIzaTestJudgeSecretKey12345"
         with patch.dict("os.environ", {
             "EVAL_PERSONAL_ACCESS_TOKEN": "tok",
@@ -507,6 +513,12 @@ class AgenticEvalSuiteTests(unittest.TestCase):
             b'data: {"type":"finish","context":"[Chunk 1]: Critical bug triage is 2 operational business hours; no fixed resolution time.","metrics":{"ttft_ms":100,"total_ms":200,"token_usage":{"prompt":200,"completion":25,"total":225},"agent":{"tool":"rag_retrieval","steps":4,"max_steps":6,"retrieval_attempts":1,"max_retrieval_attempts":2,"reformulated":false,"evidence_sufficient":true,"evidence_reason":"sufficient_evidence"}}}\n\n',
         ]
 
+        identity = dict(organization=cases_list[-1]["required_permission_context"]["project_id"], department="Engineering",
+                        role="manager", grants=[], projects=[], d12_membership=False)
+        identity["organization"] = next(c for c in cases_list if c["workspace"] == "enterprise")["required_permission_context"]["project_id"]
+        verification = patch.object(suite, "verified_enterprise_context", return_value=identity)
+        verification.start()
+        self.addCleanup(verification.stop)
         def fail_judge_only(url, **kwargs):
             if "generativelanguage.googleapis.com" in url:
                 return FakeGeminiResponse(503)
@@ -869,6 +881,240 @@ class AgenticEvalSuiteTests(unittest.TestCase):
         self.assertFalse(e22_det_with_chunks["zero_unauthorized_chunks_exposed"])
         self.assertFalse(e22_det_with_chunks["access_denial_correct"])
         self.assertEqual(e22_det_with_chunks["failure_category"], "unauthorized_chunk_or_leak")
+
+    def test_verified_enterprise_context_and_strict_case_eligibility_positive_and_negative(self):
+        dataset = Path(__file__).resolve().parents[1] / "evals/agentic_eval_40.jsonl"
+        cases = {c["case_id"]: c for c in suite.load_eval_dataset(dataset)}
+        org_id = cases["E01"]["required_permission_context"]["project_id"]
+
+        class FakeRestResp:
+            def __init__(self, payload, status_code=200):
+                self._payload = payload
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise RuntimeError(f"HTTP {self.status_code}")
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/auth/v1/user"):
+                return FakeRestResp({"id": "user-123"})
+            if url.endswith("/rest/v1/organization_employees"):
+                return FakeRestResp([{"role": "employee", "department_id": "dept-eng"}])
+            if url.endswith("/rest/v1/departments"):
+                return FakeRestResp([{"name": "Engineering"}])
+            if url.endswith("/rest/v1/document_grants"):
+                return FakeRestResp([])
+            if url.endswith("/rest/v1/project_memberships"):
+                return FakeRestResp([])
+            raise AssertionError(f"Unexpected GET {url}")
+
+        with patch.dict("os.environ", {
+            "NEXT_PUBLIC_ENTERPRISE_SUPABASE_URL": "https://example.supabase.co",
+            "NEXT_PUBLIC_ENTERPRISE_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+            "ENTERPRISE_SUPABASE_SECRET_KEY": "sb_secret_test",
+        }), patch.object(suite.requests, "get", side_effect=fake_get):
+            verified = suite.verified_enterprise_context("jwt-token", org_id)
+
+        self.assertEqual(verified["role"], "employee")
+        self.assertEqual(verified["department"], "Engineering")
+        self.assertEqual(verified["grants"], [])
+        self.assertEqual(verified["projects"], [])
+        self.assertFalse(verified["d12_membership"])
+
+        # Positive strict matches for Engineering employee (0 grants, 0 memberships).
+        for cid in ("E01", "E06", "E16", "E17", "E20"):
+            ok, reason = suite.verified_case_eligibility(cases[cid], verified)
+            self.assertTrue(ok, f"{cid} unexpectedly ineligible: {reason}")
+
+        # Negative strict mismatches marked NOT_RUN (manager cases, foreign dept, missing grants/D12 membership).
+        for cid in ("E07", "E09", "E10", "E11", "E12", "E13", "E14", "E15", "E21", "E22", "E25"):
+            ok, _ = suite.verified_case_eligibility(cases[cid], verified)
+            self.assertFalse(ok, f"{cid} should be ineligible under Engineering employee")
+
+        # Positive D12 grant & membership checks.
+        pm_member = {**verified, "department": "Product Management", "projects": ["be1563f5-fa66-4e4d-985a-6b32b0acc045"], "d12_membership": True}
+        self.assertTrue(suite.verified_case_eligibility(cases["E13"], pm_member)[0])
+        self.assertFalse(suite.verified_case_eligibility(cases["E14"], pm_member)[0])
+
+        eng_d12_full = {**verified, "grants": ["f6e8e6bb-9e19-4261-af1d-3c0e6d9b69ba"], "projects": ["be1563f5-fa66-4e4d-985a-6b32b0acc045"], "d12_membership": True}
+        self.assertTrue(suite.verified_case_eligibility(cases["E14"], eng_d12_full)[0])
+        # Non-D12 project membership must NOT satisfy E13/E14.
+        non_d12 = {**verified, "department": "Product Management", "projects": ["some-other-proj"], "d12_membership": False}
+        self.assertFalse(suite.verified_case_eligibility(cases["E13"], non_d12)[0])
+
+        # CXO mismatch rejected even for company/standard/prompt-injection cases.
+        cxo_ctx = {**verified, "role": "cxo"}
+        for cid in ("E01", "E10", "E17", "E21", "E22"):
+            self.assertFalse(suite.verified_case_eligibility(cases[cid], cxo_ctx)[0])
+
+        # Historical --merge-from Enterprise rows without verified_identity are reset to complete NOT_RUN records.
+        merged_input = {
+            "P01": {
+                "case_id": "P01", "workspace": "personal", "category": "direct_factual", "expected_behavior": "answer",
+                "live_execution_status": "HTTP_200", "answer_text": "Fewer than 10,000 chunks [Chunk 1].",
+                "citations_detail": [{"index": 1, "id": "38a01af9-01da-4e13-a7b3-2d75715422c6"}], "total_tokens": 100,
+            },
+            "E21": {
+                "case_id": "E21", "workspace": "enterprise", "category": "prompt_injection", "expected_behavior": "refuse",
+                "live_execution_status": "HTTP_200", "answer_text": suite.ENTERPRISE_REFUSAL, "citations_detail": [], "total_tokens": 50,
+                "verified_identity": verified,  # role=employee mismatches required role=manager
+            },
+        }
+        with patch.dict("os.environ", {"EVAL_PERSONAL_ACCESS_TOKEN": "tok", "EVAL_ENTERPRISE_ACCESS_TOKEN": "tok2"}), \
+             patch.object(suite, "load_dotenv"), \
+             patch.object(suite, "verified_enterprise_context", return_value=verified):
+            out = suite.run_live(
+                [cases["P01"], cases["E21"]],
+                "http://127.0.0.1:3000/api/chat",
+                stream=True,
+                max_cases=5,
+                selected_ids={"P01", "E21"},
+                existing_results=merged_input,
+                judge=False,
+            )
+        by_id = {r["case_id"]: r for r in out["results"]}
+        self.assertEqual(by_id["P01"]["live_execution_status"], "HTTP_200")
+        self.assertTrue(by_id["P01"]["task_check_passed"])
+        self.assertEqual(by_id["E21"]["live_execution_status"], "NOT_RUN")
+        self.assertEqual(by_id["E21"]["judge_status"], "NOT_RUN")
+        self.assertIsNone(by_id["E21"]["task_check_passed"])
+
+    def test_judge_receives_fallback_questions_without_affecting_security_denial_or_criteria(self):
+        dataset = Path(__file__).resolve().parents[1] / "evals/agentic_eval_40.jsonl"
+        cases = {c["case_id"]: c for c in suite.load_eval_dataset(dataset)}
+        sample_fallback = [
+            "What does the Engineering SOP require before approving a pull request?",
+            "How do I request leave under the Leave and Attendance Policy?",
+        ]
+
+        class FakeGeminiOk:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "candidates": [{
+                        "finishReason": "STOP",
+                        "content": {
+                            "parts": [{
+                                "text": json.dumps({
+                                    "answer_correctness_score": 5,
+                                    "faithfulness_score": None,
+                                    "unsupported_claims_score": None,
+                                    "unsupported_claims_count": None,
+                                    "passed": True,
+                                    "explanation": "Abstained cleanly and provided accessible fallback suggestions.",
+                                })
+                            }]
+                        },
+                    }],
+                    "usageMetadata": {"promptTokenCount": 420, "candidatesTokenCount": 30, "totalTokenCount": 450},
+                }
+
+            def close(self):
+                return None
+
+        captured_prompts = []
+
+        def capture_judge_post(url, **kwargs):
+            captured_prompts.append(kwargs["json"]["contents"][0]["parts"][0]["text"])
+            return FakeGeminiOk()
+
+        # 1. E25 receives both assistant_answer and fallback_questions without altering criteria.
+        with patch.object(suite.requests, "post", side_effect=capture_judge_post):
+            res_with_fb = suite.evaluate_case_with_gemini_judge(
+                cases["E25"],
+                status_code=200,
+                text=suite.ENTERPRISE_REFUSAL,
+                citations=[],
+                eval_context="",
+                api_key="test-key",
+                fallback_questions=sample_fallback,
+            )
+            res_no_fb = suite.evaluate_case_with_gemini_judge(
+                cases["P10"],
+                status_code=200,
+                text=suite.PERSONAL_REFUSAL,
+                citations=[],
+                eval_context="",
+                api_key="test-key",
+                fallback_questions=[],
+            )
+        self.assertTrue(res_with_fb["judge_passed"])
+        self.assertEqual(res_with_fb["judge_answer_correctness"], 5)
+        self.assertEqual(res_with_fb["judge_status"], "JUDGED_NO_EVIDENCE")
+        self.assertIn('"assistant_answer": "I don\'t know based on the documents I can access."', captured_prompts[0])
+        self.assertIn('"fallback_questions":', captured_prompts[0])
+        self.assertIn(sample_fallback[0], captured_prompts[0])
+        self.assertIn(f'"evaluation_criteria": {json.dumps(cases["E25"]["evaluation_criteria"])}', captured_prompts[0])
+        self.assertNotIn('"fallback_questions":', captured_prompts[1])
+
+        # 2. Security denials remain deterministically excluded (0 Gemini calls) even if fallback_questions are passed.
+        with patch.object(suite.requests, "post") as post_mock:
+            sec_res = suite.evaluate_case_with_gemini_judge(
+                cases["E11"],
+                status_code=200,
+                text=suite.ENTERPRISE_REFUSAL,
+                citations=[],
+                eval_context="",
+                api_key="test-key",
+                fallback_questions=sample_fallback,
+            )
+            post_mock.assert_not_called()
+        self.assertEqual(sec_res["judge_status"], "NOT_MEASURED")
+
+        # 3. End-to-end run_live SSE forwards finish.fallbackQuestions into evaluate_case_with_gemini_judge.
+        sse_e25 = [
+            b'data: {"type":"metadata","citations":[]}\n\n',
+            b'data: {"type":"text","text":"I don\'t know based on the documents I can access."}\n\n',
+            (
+                'data: {"type":"finish","fallbackQuestions":'
+                + json.dumps(sample_fallback)
+                + ',"metrics":{"ttft_ms":100,"total_ms":120,"token_usage":{"prompt":500,"completion":20,"total":520},'
+                '"agent":{"tool":"rag_retrieval","steps":4,"max_steps":6,"retrieval_attempts":1,"max_retrieval_attempts":2,"reformulated":false,"evidence_sufficient":false,"evidence_reason":"no_evidence","final_outcome":"abstain"}}}\n\n'
+            ).encode("utf-8"),
+        ]
+        mgr_identity = {
+            "organization": cases["E25"]["required_permission_context"]["project_id"],
+            "department": "Engineering",
+            "role": "manager",
+            "grants": [],
+            "projects": [],
+            "d12_membership": False,
+        }
+        sse_prompts = []
+
+        def fake_live_post(url, **kwargs):
+            if "generativelanguage.googleapis.com" in url:
+                sse_prompts.append(kwargs["json"]["contents"][0]["parts"][0]["text"])
+                return FakeGeminiOk()
+            return FakeStreamResponse(sse_e25)
+
+        with patch.dict("os.environ", {
+            "EVAL_PERSONAL_ACCESS_TOKEN": "tok",
+            "EVAL_ENTERPRISE_ACCESS_TOKEN": "tok2",
+            "GOOGLE_GENERATIVE_AI_API_KEY": "test-key",
+        }), patch.object(suite, "load_dotenv"), \
+             patch.object(suite, "verified_enterprise_context", return_value=mgr_identity), \
+             patch.object(suite.requests, "post", side_effect=fake_live_post):
+            live_out = suite.run_live(
+                list(cases.values()),
+                "http://127.0.0.1:3000/api/chat",
+                stream=True,
+                max_cases=1,
+                selected_ids={"E25"},
+                judge=True,
+            )
+        e25_row = live_out["results"][0]
+        self.assertTrue(e25_row["task_check_passed"])
+        self.assertTrue(e25_row["judge_passed"])
+        self.assertEqual(e25_row["fallback_questions"], sample_fallback)
+        self.assertEqual(len(sse_prompts), 1)
+        self.assertIn('"fallback_questions":', sse_prompts[0])
+        self.assertIn(sample_fallback[1], sse_prompts[0])
 
 
 if __name__ == "__main__":

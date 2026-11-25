@@ -241,7 +241,7 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
     assert.equal(body.metrics.agent.evidence_sufficient, false)
   })
 
-  await t.test("7. Natural Jira status phrasing -> LLM invokes jira_status (authorized ECD vs denied KAN)", async (st) => {
+  await t.test("7. Natural Jira status phrasing -> LLM invokes jira_status (authorized ECD and KAN vs denied SEC)", async (st) => {
     let statusCalls = 0
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
@@ -261,7 +261,8 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
       }
       if (url.hostname === "jira-status.invalid") {
         statusCalls++
-        return Response.json({ success: true, ticketKey: "ECD-6", status: "In Progress", summary: "Auth check" })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { issueKey?: string }
+        return Response.json({ success: true, ticketKey: body.issueKey ?? "ECD-6", status: "In Progress", summary: "Auth check" })
       }
       assert.fail(`Unexpected URL: ${url.href}`)
     })
@@ -277,13 +278,42 @@ test("Step 4: LLM-driven single-agent orchestration scenarios (Personal & Enterp
     assert.match(okBody.text, /ECD-6 — In Progress/)
     assert.equal(statusCalls, 1)
 
-    const blockedRes = await chatPost(new Request("https://app.invalid/api/chat", {
+    const kanRes = await chatPost(new Request("https://app.invalid/api/chat", {
       method: "POST",
       headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
       body: JSON.stringify({ organizationId: ORG_ID, query: "Any progress update on KAN-12?", stream: false }),
     }))
+    assert.equal(kanRes.status, 200)
+    const kanBody = await kanRes.json()
+    assert.equal(kanBody.metrics.agent.tool, "jira_status")
+    assert.match(kanBody.text, /KAN-12 — In Progress/)
+    assert.equal(statusCalls, 2)
+
+    const kanFollowUpRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        organizationId: ORG_ID,
+        query: "What is the status of my ticket?",
+        lastJiraTicketKey: "KAN-12",
+        stream: false,
+      }),
+    }))
+    assert.equal(kanFollowUpRes.status, 200)
+    const kanFollowUpBody = await kanFollowUpRes.json()
+    assert.equal(kanFollowUpBody.metrics.agent.tool, "jira_status")
+    assert.match(kanFollowUpBody.text, /KAN-12 — In Progress/)
+    assert.equal(statusCalls, 3)
+
+    const blockedRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ organizationId: ORG_ID, query: "Any progress update on SEC-12?", stream: false }),
+    }))
     assert.equal(blockedRes.status, 403)
-    assert.equal(statusCalls, 1)
+    const blockedBody = await blockedRes.json()
+    assert.equal(blockedBody.error, "Only ECD and KAN project Jira tickets are accessible in this demo.")
+    assert.equal(statusCalls, 3)
   })
 
   await t.test("8. Natural Jira creation phrasing -> LLM prepares confirmation draft without auto-creating ticket", async (st) => {

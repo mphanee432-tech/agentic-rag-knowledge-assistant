@@ -5,12 +5,15 @@ import { POST as POST_OPTIONS } from "../app/api/jira/options/route"
 import { POST as POST_STATUS } from "../app/api/jira/status/route"
 import { buildAccountSummary } from "../lib/account-summary"
 import {
+  ALLOWED_JIRA_PROJECTS,
   DEFAULT_JIRA_PROJECT_ID,
   draftJiraTicket,
   extractJiraStatusIssueKey,
   extractLatestJiraTicketKeyFromMessages,
   formatJiraStatusMessage,
   isKeylessJiraStatusQuery,
+  JIRA_ALLOWED_ISSUE_KEY_PATTERN,
+  JIRA_STATUS_CLARIFICATION_PROMPT,
 } from "../lib/jira-ticket"
 
 const DEFAULT_ISSUE_TYPE_ID = "10011"
@@ -472,6 +475,30 @@ test("extracts and normalizes explicit Jira status requests without affecting cr
     ]),
     "ECD-6",
   )
+  assert.equal(extractJiraStatusIssueKey("Check status of kan-1"), "KAN-1")
+  assert.equal(
+    extractLatestJiraTicketKeyFromMessages([
+      { role: "assistant", content: "Created Jira ticket **KAN-1**." },
+    ]),
+    "KAN-1",
+  )
+  assert.equal(
+    extractLatestJiraTicketKeyFromMessages([
+      { role: "assistant", content: formatJiraStatusMessage({ ticketKey: "KAN-1", status: "Idea", summary: "VPN" }) },
+    ]),
+    "KAN-1",
+  )
+  assert.deepEqual(
+    ALLOWED_JIRA_PROJECTS.map((project) => project.key),
+    ["ECD", "KAN"],
+  )
+  assert.equal(JIRA_ALLOWED_ISSUE_KEY_PATTERN.test("ECD-6"), true)
+  assert.equal(JIRA_ALLOWED_ISSUE_KEY_PATTERN.test("KAN-1"), true)
+  assert.equal(JIRA_ALLOWED_ISSUE_KEY_PATTERN.test("SEC-1"), false)
+  assert.equal(
+    JIRA_STATUS_CLARIFICATION_PROMPT,
+    "Please share the Jira ticket ID (for example, ECD-6 or KAN-1) so I can check its status.",
+  )
 
   assert.equal(draftJiraTicket("What is the status of ECD-6?"), null)
   assert.equal(draftJiraTicket("Track ticket ECD-6"), null)
@@ -482,7 +509,7 @@ test("extracts and normalizes explicit Jira status requests without affecting cr
   assert.equal(extractJiraStatusIssueKey("What does ECD-6 policy say about VPN?"), null)
 })
 
-test("Jira status route enforces auth, membership, ECD allowlist, and validates webhook response", async (t) => {
+test("Jira status route enforces auth, membership, ECD/KAN allowlist, and validates webhook response", async (t) => {
   const organizationId = "11111111-1111-4111-8111-111111111111"
   const env = {
     NEXT_PUBLIC_SUPABASE_URL: "https://supabase.invalid",
@@ -499,12 +526,12 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
   })
 
   let webhookCalls = 0
-  let webhookResponse = () =>
+  let webhookResponse: ((issueKey: string) => Response) = (issueKey) =>
     Response.json({
       success: true,
-      ticketKey: "ECD-6",
-      status: "To Do",
-      summary: "VPN disconnects firs ticket",
+      ticketKey: issueKey,
+      status: issueKey.startsWith("KAN-") ? "Idea" : "To Do",
+      summary: issueKey.startsWith("KAN-") ? "KAN summary" : "VPN disconnects firs ticket",
       internalField: "do-not-expose",
     })
 
@@ -529,8 +556,9 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     assert.equal(url.href, "https://activepieces.invalid/api/v1/webhooks/status/sync")
     assert.equal(init?.method, "POST")
     assert.equal(token, null)
-    assert.deepEqual(JSON.parse(String(init?.body)), { issueKey: "ECD-6" })
-    return webhookResponse()
+    const parsedBody = JSON.parse(String(init?.body)) as { issueKey: string }
+    assert.match(parsedBody.issueKey, /^(?:ECD-6|KAN-1)$/)
+    return webhookResponse(parsedBody.issueKey)
   })
 
   const lookup = (body: unknown, token = "employee", contentType = "application/json") =>
@@ -551,13 +579,18 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     { organizationId: "invalid", issueKey: "ECD-6" },
     { organizationId, issueKey: "" },
     { organizationId, issueKey: "ECD-0" },
+    { organizationId, issueKey: "KAN-0" },
     { organizationId, issueKey: "not-a-key" },
   ]) {
     assert.equal((await lookup(invalid)).status, 400)
   }
 
-  for (const forbiddenKey of ["ABC-1", "ENG-12", "OPS-99"]) {
-    assert.equal((await lookup({ organizationId, issueKey: forbiddenKey })).status, 403)
+  for (const forbiddenKey of ["ABC-1", "ENG-12", "OPS-99", "SEC-1"]) {
+    const forbidden = await lookup({ organizationId, issueKey: forbiddenKey })
+    assert.equal(forbidden.status, 403)
+    assert.deepEqual(await forbidden.json(), {
+      error: "Only ECD and KAN project Jira tickets are accessible in this demo.",
+    })
   }
 
   delete process.env.ACTIVEPIECES_JIRA_STATUS_WEBHOOK_URL
@@ -573,6 +606,15 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     summary: "VPN disconnects firs ticket",
   })
   assert.equal(webhookCalls, 1)
+
+  const okKan = await lookup({ organizationId, issueKey: " kan-1 " })
+  assert.equal(okKan.status, 200)
+  assert.deepEqual(await okKan.json(), {
+    ticketKey: "KAN-1",
+    status: "Idea",
+    summary: "KAN summary",
+  })
+  assert.equal(webhookCalls, 2)
 
   webhookResponse = () => Response.json({ error: "Not found" }, { status: 404 })
   assert.equal((await lookup({ organizationId, issueKey: "ECD-6" })).status, 404)
@@ -592,7 +634,7 @@ test("Jira status route enforces auth, membership, ECD allowlist, and validates 
     const response = await lookup({ organizationId, issueKey: "ECD-6" })
     assert.equal(response.status, 502)
   }
-  assert.equal(webhookCalls, 9)
+  assert.equal(webhookCalls, 10)
 })
 
 test("WP9.13: demo Jira opt-in authorizes ECD/KAN without enterprise membership and denies opt-out users", async (t) => {

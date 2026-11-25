@@ -25,6 +25,24 @@ export function isStandaloneCapabilityQuestion(query: string): boolean {
   return STANDALONE_CAPABILITY_PATTERN.test(query)
 }
 
+// Match requests to exercise access administration, including polite imperatives.
+export function requestsPermissionChange(query: string): boolean {
+  const commands = query.toLowerCase().split(/[.!?;:\n]+|\b(?:and then|then)\s+/)
+  const prefix = /^\s*(?:(?:please|kindly)\s+|(?:can|could|would|will)\s+you\s+|i (?:want|need) you to\s+)*/
+  const access = /^(?:grant|give|assign|enable|revoke|remove|set|change|modify|upgrade|elevate|escalate)\s+(?:(?:me|my account|the user|us)\s+)?(?:(?:my|our|the|read|write|full|administrative|admin|elevated|account|user)\s+)*(?:access|permissions?|privileges?|role)\b/
+  const role = /^(?:make|promote|elevate|add|assign)\s+(?:me|my account|us)\s+(?:(?:to|as|the|an?|role|of|security)\s+)*(?:admin(?:istrator)?|owner|manager)\b/
+  return commands.some(clause => {
+    const command = clause.replace(prefix, "")
+    return access.test(command) || role.test(command)
+  })
+}
+
+export function eligibleConversation(query: string): DeterministicIntent | null {
+  return getDeterministicIntent(query) ?? (
+    /^(?:hi|hey|hello)(?: there)?(?:[,! ]+(?:nice|good) to (?:meet|see) you(?: today)?)?[.!?\s]*$/i.test(query.trim()) ? "greeting" : null
+  )
+}
+
 export type DeterministicIntent = "greeting" | "identity" | "capability"
 
 export function getDeterministicIntent(query: string): DeterministicIntent | null {

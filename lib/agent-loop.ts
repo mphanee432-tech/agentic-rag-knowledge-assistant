@@ -20,7 +20,7 @@ export type AgentTool =
 export type JiraTicketDraft = NonNullable<ReturnType<typeof draftJiraTicket>>
 
 export type AgentToolDecision =
-  | { tool: "deterministic_reply"; intent: DeterministicIntent; requiresConfirmation: false }
+  | { tool: "deterministic_reply"; intent: DeterministicIntent | "permission_refusal"; requiresConfirmation: false }
   | { tool: "jira_status"; issueKey: string; requiresConfirmation: false }
   | { tool: "jira_status_clarification"; requiresConfirmation: false }
   | { tool: "jira_create_draft"; draft: JiraTicketDraft; requiresConfirmation: true }
@@ -302,10 +302,14 @@ export function clampEvidenceDecision(
   const hasSupportingEvidence = !hasSupportingCheck || validSupportingIndices.length > 0
   const supportingIndicesOut = validSupportingIndices ?? []
 
-  if (raw.nextAction === "retry_retrieval") {
+  if (raw.nextAction === "retry_retrieval" || (
+    raw.nextAction === "abstain" && quality === "partial" && supportingIndicesOut.length > 0 &&
+    canRetry && isDistinctReformulation
+  )) {
     if (canRetry && isDistinctReformulation) {
       return {
         ...raw,
+        nextAction: "retry_retrieval",
         sufficient: false,
         evidenceQuality: quality === "sufficient" ? "partial" : quality,
         supportingChunkIndices: supportingIndicesOut,
@@ -545,7 +549,8 @@ export async function runBoundedRetrievalLoop(params: {
     const priorChunkIds = new Set(chunks.map((chunk) => chunk.id))
     const secondChunks = await params.retrieveForQuery(decision.reformulatedQuery)
     const newChunkCount = secondChunks.filter((chunk) => !priorChunkIds.has(chunk.id)).length
-    chunks = mergeUniqueChunks(secondChunks, chunks, 8)
+    const supported = (decision.supportingChunkIndices ?? []).slice(0, 7).map(index => chunks[index - 1])
+    chunks = mergeUniqueChunks(supported, mergeUniqueChunks(secondChunks, chunks), 8)
     params.onStep?.({
       phase: "retrieval_attempt_2_completed",
       authorizedChunks: secondChunks.length,
