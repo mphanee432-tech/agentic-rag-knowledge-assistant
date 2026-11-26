@@ -1114,7 +1114,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
     assert.equal((finish.metrics.retries as { generation: number }).generation, 1)
   })
 
-  await t.test("22. Exhausted retry budget on persistent incomplete stream fails gracefully and logs sanitized production telemetry", async (st) => {
+  await t.test("22. Exhausted retry budget and fallback on persistent failure log sanitized production telemetry", async (st) => {
     const prevNodeEnv = process.env.NODE_ENV
     Object.assign(process.env, { NODE_ENV: "production" })
     st.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
@@ -1129,6 +1129,7 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
 
     const chunkId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
     let streamCalls = 0
+    let fallbackCalls = 0
     st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(input instanceof Request ? input.url : String(input))
       if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
@@ -1148,10 +1149,16 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
             candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "LEAK_GUARD_REASON", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
           })
         }
-        streamCalls++
-        const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Buffered partial " }] } }] })}\n\n`
-        const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
-        return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+        if (url.pathname.endsWith(":streamGenerateContent")) {
+          streamCalls++
+          assert.match(url.pathname, /models\/gemini-3\.5-flash-lite:streamGenerateContent$/)
+          const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Buffered partial " }] } }] })}\n\n`
+          const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+          return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+        }
+        fallbackCalls++
+        assert.match(url.pathname, /models\/gemini-3\.5-flash-lite:generateContent$/)
+        return Response.json({ error: { code: 503, status: "UNAVAILABLE", message: "fallback busy" } }, { status: 503 })
       }
       assert.fail(`Unexpected URL: ${url.href}`)
     })
@@ -1166,18 +1173,27 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
     await assert.rejects(readChatStream(sseRes, (ev) => events.push(ev)), /The answer could not be completed\. Please retry\./)
     await logDone
     assert.equal(streamCalls, 2)
+    assert.equal(fallbackCalls, 1)
     assert.equal(events.some((e) => e.type === "text" || e.type === "finish"), false)
     assert.equal(logs.length, 1)
     assert.equal(logs[0].status, "error")
-    assert.equal(logs[0].failure_stage, "answer_validation")
-    assert.equal(logs[0].failure_category, "generation_incomplete")
+    assert.equal(logs[0].failure_stage, "model_stream_finalization")
+    assert.equal(logs[0].failure_category, "provider_error")
     assert.equal(logs[0].model_id, "gemini-3.5-flash-lite")
+    assert.equal(logs[0].fallback_model_id, "gemini-3.5-flash-lite")
+    assert.equal(logs[0].generation_fallback_attempted, true)
+    assert.equal(logs[0].generation_fallback_succeeded, false)
     assert.equal(logs[0].model_finish_reason, "other")
-    assert.equal(logs[0].provider_error_status, null)
+    assert.equal(logs[0].model_raw_finish_reason, null)
+    assert.equal(logs[0].provider_error_status, 503)
+    assert.equal(logs[0].provider_error_code, "UNAVAILABLE")
+    assert.equal(logs[0].abort_reason_category, "none")
+    assert.equal(logs[0].buffered_text_chars, 17)
+    assert.equal(logs[0].emitted_text_chars, 0)
     assert.equal((logs[0].retries as { generation: number }).generation, 1)
     assert.match(String(logs[0].interaction_id), /^[0-9a-f-]{36}$/i)
     const serialized = JSON.stringify(logs[0])
-    for (const secret of ["CONFIDENTIAL_QUERY_PROMPT", "SECRET_DOC_CONTENT_DO_NOT_LOG", "LEAK_GUARD_REASON", "test-google-key", "sb_secret"]) {
+    for (const secret of ["CONFIDENTIAL_QUERY_PROMPT", "SECRET_DOC_CONTENT_DO_NOT_LOG", "LEAK_GUARD_REASON", "Buffered partial", "test-google-key", "sb_secret"]) {
       assert.equal(serialized.includes(secret), false, `Must not log ${secret}`)
     }
   })
@@ -1324,6 +1340,156 @@ test("Gemini orchestration reliability: bounded retries, timeouts, cancellation,
         assert.ok(finish && finish.type === "finish")
         assert.equal((finish.metrics.retries as { generation: number }).generation, 1)
         assert.equal(logs.length, 0, "Production should not emit failure telemetry on successful requests")
+      })
+    }
+  })
+
+  await t.test("25. Enterprise incomplete stream falls back cleanly without duplicate text while preserving citations and RLS recheck", async (st) => {
+    const prevNodeEnv = process.env.NODE_ENV
+    Object.assign(process.env, { NODE_ENV: "production" })
+    st.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
+
+    const logs: Array<Record<string, unknown>> = []
+    st.mock.method(console, "info", (val: string) => { logs.push(JSON.parse(val)) })
+
+    const chunk1 = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+    let streamCalls = 0
+    let fallbackCalls = 0
+    let visibilityChecks = 0
+
+    st.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : String(input))
+      if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+      if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
+      if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
+        return Response.json([{ id: chunk1, content: "Employees complete onboarding within five business days.", metadata: { title: "Onboarding" } }])
+      }
+      if (url.pathname === "/rest/v1/rpc/enterprise_chunks_still_visible") {
+        visibilityChecks++
+        return Response.json(true)
+      }
+      if (url.pathname === "/rest/v1/rpc/enterprise_fallback_documents") return Response.json([])
+      if (url.hostname === "generativelanguage.googleapis.com") {
+        if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+        const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+        if (body.tools) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "onboarding checklist" } } }] }, finishReason: "STOP" }],
+          })
+        }
+        if (body.generationConfig?.responseJsonSchema) {
+          return Response.json({
+            candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+          })
+        }
+        if (url.pathname.endsWith(":streamGenerateContent")) {
+          streamCalls++
+          const partial = `data: ${JSON.stringify({ candidates: [{ index: 0, content: { role: "model", parts: [{ text: "STALE_PRIMARY_BUFFER " }] } }] })}\n\n`
+          const mid503 = `data: ${JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: "high demand" } })}\n\n`
+          return new Response(partial + mid503, { headers: { "Content-Type": "text/event-stream" } })
+        }
+        fallbackCalls++
+        assert.match(url.pathname, /models\/gemini-3\.5-flash-lite:generateContent$/)
+        return Response.json({
+          candidates: [{ content: { role: "model", parts: [{ text: "New employees complete onboarding within five business days [Chunk 1]." }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 90, candidatesTokenCount: 12, totalTokenCount: 102 },
+        })
+      }
+      assert.fail(`Unexpected URL: ${url.href}`)
+    })
+
+    const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+      method: "POST",
+      headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+      body: JSON.stringify({ organizationId: ORG_ID, query: "Summarize onboarding timelines.", stream: true }),
+    }))
+    assert.equal(sseRes.status, 200)
+    const events: ChatEvent[] = []
+    await readChatStream(sseRes, (ev) => events.push(ev))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(streamCalls, 2)
+    assert.equal(fallbackCalls, 1)
+    assert.equal(visibilityChecks, 1)
+    const fullText = events.filter((e) => e.type === "text").map((e) => e.text).join("")
+    assert.equal(fullText, "New employees complete onboarding within five business days [Chunk 1].")
+    assert.equal(fullText.includes("STALE_PRIMARY_BUFFER"), false)
+    const meta = events.find((e) => e.type === "metadata")
+    assert.ok(meta && meta.type === "metadata")
+    assert.deepEqual(meta.citations.map((c) => c.id), [chunk1])
+    assert.equal(logs.length, 0)
+  })
+
+  await t.test("26. Unexpected raw finish reason (SAFETY / OTHER) fails closed without bypassing enterprise validation and logs normalized + raw finish reasons", async (st) => {
+    for (const rawReason of ["SAFETY", "OTHER"] as const) {
+      await st.test(`rawFinishReason=${rawReason}`, async (sst) => {
+        const prevNodeEnv = process.env.NODE_ENV
+        Object.assign(process.env, { NODE_ENV: "production" })
+        sst.after(() => { Object.assign(process.env, { NODE_ENV: prevNodeEnv }) })
+
+        const logs: Array<Record<string, unknown>> = []
+        let logged!: () => void
+        const logDone = new Promise<void>((resolve) => { logged = resolve })
+        sst.mock.method(console, "info", (val: string) => {
+          logs.push(JSON.parse(val))
+          logged()
+        })
+
+        const chunk1 = "12121212-1212-4121-8121-121212121212"
+        let streamCalls = 0
+        let fallbackCalls = 0
+
+        sst.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(input instanceof Request ? input.url : String(input))
+          if (url.pathname === "/auth/v1/user") return Response.json({ id: "u1", role: "authenticated" })
+          if (url.pathname === "/rest/v1/rpc/enterprise_copilot_context") return Response.json([{ organization_id: ORG_ID, can_upload_policy: false }])
+          if (url.pathname === "/rest/v1/rpc/search_enterprise_chunks") {
+            return Response.json([{ id: chunk1, content: "Confidential policy body.", metadata: {} }])
+          }
+          if (url.pathname === "/rest/v1/rpc/enterprise_fallback_documents") return Response.json([])
+          if (url.hostname === "generativelanguage.googleapis.com") {
+            if (url.pathname.endsWith(":batchEmbedContents")) return Response.json({ embeddings: [{ values: Array(1536).fill(0.1) }] })
+            const body = JSON.parse(String(init?.body ?? "{}")) as { tools?: unknown[]; generationConfig?: { responseJsonSchema?: unknown } }
+            if (body.tools) {
+              return Response.json({
+                candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "rag_retrieval", args: { searchQuery: "policy" } } }] }, finishReason: "STOP" }],
+              })
+            }
+            if (body.generationConfig?.responseJsonSchema) {
+              return Response.json({
+                candidates: [{ content: { role: "model", parts: [{ text: JSON.stringify({ sufficient: true, evidenceQuality: "sufficient", supportingChunkIndices: [1], reason: "found", nextAction: "answer", reformulatedQuery: null, clarificationQuestion: null }) }] }, finishReason: "STOP" }],
+              })
+            }
+            if (url.pathname.endsWith(":streamGenerateContent")) {
+              streamCalls++
+              return new Response(`data: ${JSON.stringify({
+                candidates: [{ index: 0, content: { role: "model", parts: [{ text: "Partial blocked [Chunk 1]." }] }, finishReason: rawReason }],
+              })}\n\n`, { headers: { "Content-Type": "text/event-stream" } })
+            }
+            fallbackCalls++
+            return Response.json({
+              candidates: [{ content: { role: "model", parts: [{ text: "Still incomplete [Chunk 1]." }] }, finishReason: rawReason }],
+            })
+          }
+          assert.fail(`Unexpected URL: ${url.href}`)
+        })
+
+        const sseRes = await chatPost(new Request("https://app.invalid/api/chat", {
+          method: "POST",
+          headers: { Authorization: "Bearer ent-tok", "Content-Type": "application/json" },
+          body: JSON.stringify({ organizationId: ORG_ID, query: "Read the policy.", stream: true }),
+        }))
+        assert.equal(sseRes.status, 200)
+        const events: ChatEvent[] = []
+        await assert.rejects(readChatStream(sseRes, (ev) => events.push(ev)), /The answer could not be completed\. Please retry\./)
+        await logDone
+        assert.equal(streamCalls, rawReason === "SAFETY" ? 1 : 2)
+        assert.equal(fallbackCalls, rawReason === "SAFETY" ? 0 : 1)
+        assert.equal(events.some((e) => e.type === "text" || e.type === "finish"), false)
+        assert.equal(logs[0].enterprise_rejection_reason, "incomplete_finish_reason")
+        assert.equal(logs[0].model_finish_reason, rawReason === "SAFETY" ? "content-filter" : "other")
+        assert.equal(logs[0].model_raw_finish_reason, rawReason)
+        assert.equal(logs[0].generation_fallback_attempted, rawReason === "OTHER")
+        assert.equal(logs[0].generation_fallback_succeeded, false)
       })
     }
   })

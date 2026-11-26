@@ -11,8 +11,8 @@ import {
 import type { RagChunk } from "@/lib/retrieve-chunks"
 
 export const AGENT_DECISION_MAX_ATTEMPTS = 3
-export const AGENT_DECISION_ATTEMPT_TIMEOUT_MS = 15000
-export const AGENT_DECISION_TOTAL_TIMEOUT_MS = 25000
+export const AGENT_DECISION_ATTEMPT_TIMEOUT_MS = 10000
+export const AGENT_DECISION_TOTAL_TIMEOUT_MS = 20000
 export const EVALUATOR_CHUNK_MAX_CHARS = 3200
 export const EVALUATOR_EVIDENCE_MAX_CHARS = 24000
 

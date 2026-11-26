@@ -129,11 +129,16 @@ export function getTransientGeminiRetryDelayMs(
   attempt: number,
   baseDelayMs = 250,
 ): number {
+  const status = getGeminiErrorStatus(error)
   const effectiveBase =
-    baseDelayMs > 0 && getGeminiErrorStatus(error) === 429
-      ? Math.max(baseDelayMs, 2000)
-      : baseDelayMs
-  const jittered = Math.round(effectiveBase * 2 ** (attempt - 1) * (1 + Math.random() * 0.25))
+    baseDelayMs <= 0
+      ? 0
+      : status === 429
+        ? Math.max(baseDelayMs, 2000)
+        : status === 503 || status === 500 || status === 502 || status === 504
+          ? Math.max(baseDelayMs, 400)
+          : baseDelayMs
+  const jittered = Math.min(4000, Math.round(effectiveBase * 2 ** (attempt - 1) * (1 + Math.random() * 0.25)))
   return Math.max(jittered, retryAfterMs(error))
 }
 

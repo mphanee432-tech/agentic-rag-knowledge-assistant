@@ -44,6 +44,16 @@ import {
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Request failed';
 const isAbnormalIncompleteFinish = (reason: string) => reason === 'other' || reason === 'error' || reason === 'unknown';
+const sanitizeFinishReason = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const cleaned = value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 40);
+  return cleaned || null;
+};
+const resolveFallbackModelId = (primaryModelId: string): string => {
+  const configured = process.env.FALLBACK_CHAT_MODEL?.trim();
+  if (configured && /^gemini-[a-z0-9.-]+$/.test(configured)) return configured;
+  return primaryModelId;
+};
 export const runtime = 'nodejs';
 
 type FailureStage = 'agent_decision' | 'stream_initialization' | 'model_stream_iteration' | 'model_stream_finalization'
@@ -118,6 +128,13 @@ export async function POST(req: Request) {
     interaction_write_started: false,
     retrieved_chunks_found: null as boolean | null,
     model_finish_reason: null as string | null,
+    model_raw_finish_reason: null as string | null,
+    fallback_model_id: null as string | null,
+    generation_fallback_attempted: false,
+    generation_fallback_succeeded: false,
+    abort_reason_category: 'none' as 'none' | 'request_aborted' | 'generation_deadline' | 'stream_aborted',
+    buffered_text_chars: 0,
+    emitted_text_chars: 0,
     model_refusal: false,
     evaluator_generator_disagreement: false,
     evidence_quality: null as EvidenceQuality | null,
@@ -135,11 +152,20 @@ export async function POST(req: Request) {
     const modelStage = failedStage === 'stream_initialization' || failedStage === 'model_stream_iteration'
       || failedStage === 'model_stream_finalization';
     failure.failure_stage = failedStage;
+    const isDeadlineTimeout =
+      modelStage && generationDeadline?.aborted && generationSignal?.reason === generationDeadline.reason;
+    failure.abort_reason_category = isDeadlineTimeout
+      ? 'generation_deadline'
+      : req.signal.aborted
+        ? 'request_aborted'
+        : cancelled
+          ? 'stream_aborted'
+          : 'none';
     const isCancellationError =
       (modelStage && (cancelled || req.signal.aborted))
       || (req.signal.aborted && (error === req.signal.reason || (error instanceof Error && error.name === 'AbortError')));
     const isTimeoutFailure =
-      (modelStage && generationDeadline?.aborted && generationSignal?.reason === generationDeadline.reason)
+      isDeadlineTimeout
       || (!cancelled && !req.signal.aborted && isAbortOrTimeoutError(error));
     failure.failure_category = isTimeoutFailure
       ? 'provider_timeout'
@@ -197,6 +223,13 @@ export async function POST(req: Request) {
         provider_error_code: failure.provider_error_code,
         provider_error_message: failure.provider_error_message,
         model_finish_reason: failure.model_finish_reason,
+        model_raw_finish_reason: failure.model_raw_finish_reason,
+        fallback_model_id: failure.fallback_model_id,
+        generation_fallback_attempted: failure.generation_fallback_attempted,
+        generation_fallback_succeeded: failure.generation_fallback_succeeded,
+        abort_reason_category: failure.abort_reason_category,
+        buffered_text_chars: failure.buffered_text_chars,
+        emitted_text_chars: failure.emitted_text_chars,
         model_stream_completed: failure.model_stream_completed,
         enterprise_rejection_reason: failure.enterprise_rejection_reason,
         citation_validation_failed: failure.citation_validation_failed,
@@ -243,6 +276,7 @@ export async function POST(req: Request) {
     isEvalMode = !input.wantsStream && (input.isEvalMode || req.headers.get('x-eval-mode') === 'true');
     telemetry.request_mode = isEvalMode ? 'json' : 'stream';
     const generationModelId = process.env.CHAT_MODEL || 'gemini-3.5-flash-lite';
+    const fallbackModelId = resolveFallbackModelId(generationModelId);
     telemetry.model_id = /^gemini-[a-z0-9.-]+$/.test(generationModelId) ? generationModelId : null;
     const resolvedLastTicketKey = extractLatestJiraTicketKeyFromMessages(boundedHistory) ?? lastJiraTicketKey;
     const exactDeterministicIntent = getDeterministicIntent(userQuery);
@@ -821,28 +855,75 @@ export async function POST(req: Request) {
       'Cache-Control': 'no-store',
       ...(!enterprise ? { 'x-interaction-id': interactionId } : {}),
     };
+    const executeFallbackGeneration = async (
+      rag: Awaited<ReturnType<typeof runRagOrchestration>>,
+      fallbackSignal: AbortSignal,
+    ) => {
+      failure.generation_fallback_attempted = true;
+      failure.fallback_model_id = /^gemini-[a-z0-9.-]+$/.test(fallbackModelId) ? fallbackModelId : null;
+      stage = 'model_stream_finalization';
+      const fallbackResult = await generateText({
+        model: google(fallbackModelId),
+        system: rag.systemPrompt,
+        messages: rag.messages,
+        maxOutputTokens: 1000,
+        maxRetries: 0,
+        abortSignal: AbortSignal.any([fallbackSignal, AbortSignal.timeout(10000)]),
+      });
+      rag.updateUsage(fallbackResult.usage);
+      failure.model_finish_reason = fallbackResult.finishReason;
+      failure.model_raw_finish_reason = sanitizeFinishReason(fallbackResult.rawFinishReason);
+      const incomplete = isAbnormalIncompleteFinish(fallbackResult.finishReason);
+      failure.generation_fallback_succeeded = !incomplete;
+      failure.model_stream_completed = !incomplete && !fallbackSignal.aborted;
+      return fallbackResult;
+    };
 
     if (isEvalMode) {
       const rag = await runRagOrchestration(req.signal);
       let text = rag.refusalText;
       let finishReason = 'stop';
       if (rag.shouldGenerateAnswer) {
-        const { result } = await withTransientGeminiRetry(
-          (attemptSignal) =>
-            generateText({
-              model: google(generationModelId), system: rag.systemPrompt, messages: rag.messages,
-              maxOutputTokens: 1000, maxRetries: 0, abortSignal: attemptSignal,
-            }),
-          {
-            signal: req.signal, maxAttempts: 2, attemptTimeoutMs: 25000, totalTimeoutMs: 35000,
-            onRetry: () => { telemetry.retries.generation++; },
-            shouldRetryResult: (res) => isAbnormalIncompleteFinish(res.finishReason),
-          },
-        );
-        text = result.text;
-        finishReason = result.finishReason;
-        failure.model_finish_reason = finishReason;
-        rag.updateUsage(result.usage);
+        let evalPrimaryErr: unknown = null;
+        try {
+          const { result } = await withTransientGeminiRetry(
+            (attemptSignal) =>
+              generateText({
+                model: google(generationModelId), system: rag.systemPrompt, messages: rag.messages,
+                maxOutputTokens: 1000, maxRetries: 0, abortSignal: attemptSignal,
+              }),
+            {
+              signal: req.signal, maxAttempts: 2, attemptTimeoutMs: 25000, totalTimeoutMs: 35000,
+              onRetry: () => { telemetry.retries.generation++; },
+              shouldRetryResult: (res) => isAbnormalIncompleteFinish(res.finishReason),
+            },
+          );
+          text = result.text;
+          finishReason = result.finishReason;
+          failure.model_finish_reason = finishReason;
+          failure.model_raw_finish_reason = sanitizeFinishReason(result.rawFinishReason);
+          failure.buffered_text_chars = text.length;
+          rag.updateUsage(result.usage);
+        } catch (error) {
+          if (req.signal.aborted || !isTransientGeminiError(error) || fallbackModelId === generationModelId) {
+            throw error;
+          }
+          evalPrimaryErr = error;
+        }
+        if (
+          !req.signal.aborted
+          && (evalPrimaryErr !== null || (isAbnormalIncompleteFinish(finishReason) && fallbackModelId !== generationModelId))
+        ) {
+          try {
+            const fb = await executeFallbackGeneration(rag, req.signal);
+            text = fb.text;
+            finishReason = fb.finishReason;
+            failure.buffered_text_chars = text.length;
+          } catch (fallbackError) {
+            failure.generation_fallback_succeeded = false;
+            throw fallbackError;
+          }
+        }
       }
       text = await rag.prepareEnterpriseAnswer(text, finishReason, req.signal);
       await rag.finalizeAnswer(text, finishReason);
@@ -912,23 +993,26 @@ export async function POST(req: Request) {
             generationDeadline = AbortSignal.timeout(35000);
             generationSignal = AbortSignal.any([req.signal, streamAbort.signal, generationDeadline]);
             let modelStreamErrored = false;
+            let needsFallback = false;
+            let terminalStreamError: unknown = null;
             const maxStreamAttempts = 2; // Bounded pre-emission retry; never replay already-emitted text.
             const retryStreamAttempt = async (retryErr: unknown, streamAttempt: number) => {
               telemetry.retries.generation++;
               text = '';
               telemetry.model_first_text_ms = null;
               telemetry.ttft_ms = 0;
-              await sleep(getTransientGeminiRetryDelayMs(retryErr, streamAttempt), generationSignal!);
+              await sleep(getTransientGeminiRetryDelayMs(retryErr, streamAttempt, 400), generationSignal!);
             };
             for (let streamAttempt = 1; streamAttempt <= maxStreamAttempts; streamAttempt++) {
               let attemptSawError = false;
               let attemptError: unknown = null;
               stage = 'stream_initialization';
+              const streamAttemptSignal = AbortSignal.any([generationSignal, AbortSignal.timeout(10000)]);
               try {
                 const result = streamText({
                   model: google(generationModelId), system: rag.systemPrompt, messages: rag.messages,
                   maxOutputTokens: 1000, maxRetries: 0,
-                  abortSignal: generationSignal,
+                  abortSignal: streamAttemptSignal,
                   // The SDK filters error parts out of textStream; retain their origin without raw logging.
                   onError: ({ error }) => {
                     attemptSawError = true;
@@ -959,9 +1043,16 @@ export async function POST(req: Request) {
                     }
                   }
                 }
-                if (attemptSawError && emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(attemptError)) {
-                  await retryStreamAttempt(attemptError, streamAttempt);
-                  continue;
+                failure.buffered_text_chars = text.length;
+                failure.emitted_text_chars = emittedLength;
+                if (attemptSawError && emittedLength === 0 && !generationSignal.aborted && isTransientGeminiError(attemptError)) {
+                  if (streamAttempt < maxStreamAttempts) {
+                    await retryStreamAttempt(attemptError, streamAttempt);
+                    continue;
+                  }
+                  terminalStreamError = attemptError;
+                  needsFallback = true;
+                  break;
                 }
                 if (attemptSawError) {
                   modelStreamErrored = true;
@@ -970,16 +1061,24 @@ export async function POST(req: Request) {
                   rag.updateUsage(await result.usage);
                   finishReason = await result.finishReason;
                   failure.model_finish_reason = finishReason;
+                  failure.model_raw_finish_reason = sanitizeFinishReason(await result.rawFinishReason);
                   failure.model_stream_completed = false;
                   break;
                 }
                 stage = 'model_stream_finalization';
                 const attemptUsage = await result.usage;
                 const attemptFinishReason = await result.finishReason;
+                const attemptRawFinishReason = sanitizeFinishReason(await result.rawFinishReason);
                 const incompleteFinish = isAbnormalIncompleteFinish(attemptFinishReason);
-                if (incompleteFinish && emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted) {
-                  await retryStreamAttempt(null, streamAttempt);
-                  continue;
+                if (incompleteFinish && emittedLength === 0 && !generationSignal.aborted) {
+                  if (streamAttempt < maxStreamAttempts) {
+                    await retryStreamAttempt(null, streamAttempt);
+                    continue;
+                  }
+                  failure.model_finish_reason = attemptFinishReason;
+                  failure.model_raw_finish_reason = attemptRawFinishReason;
+                  needsFallback = true;
+                  break;
                 }
                 if (incompleteFinish) {
                   modelStreamErrored = true;
@@ -987,13 +1086,21 @@ export async function POST(req: Request) {
                 rag.updateUsage(attemptUsage);
                 finishReason = attemptFinishReason;
                 failure.model_finish_reason = finishReason;
+                failure.model_raw_finish_reason = attemptRawFinishReason;
                 failure.model_stream_completed = !modelStreamErrored && !generationSignal.aborted;
                 break;
               } catch (error) {
+                failure.buffered_text_chars = text.length;
+                failure.emitted_text_chars = emittedLength;
                 const retryErr = attemptError ?? error;
-                if (emittedLength === 0 && streamAttempt < maxStreamAttempts && !generationSignal.aborted && isTransientGeminiError(retryErr)) {
-                  await retryStreamAttempt(retryErr, streamAttempt);
-                  continue;
+                if (emittedLength === 0 && !generationSignal.aborted && isTransientGeminiError(retryErr)) {
+                  if (streamAttempt < maxStreamAttempts) {
+                    await retryStreamAttempt(retryErr, streamAttempt);
+                    continue;
+                  }
+                  terminalStreamError = retryErr;
+                  needsFallback = true;
+                  break;
                 }
                 if (attemptSawError && !generationSignal.aborted) {
                   recordFailure('model_stream_iteration', attemptError);
@@ -1001,10 +1108,32 @@ export async function POST(req: Request) {
                 throw error;
               }
             }
+            if (needsFallback && emittedLength === 0 && !generationSignal.aborted) {
+              text = '';
+              telemetry.model_first_text_ms = null;
+              telemetry.ttft_ms = 0;
+              try {
+                await sleep(getTransientGeminiRetryDelayMs(terminalStreamError, 1, 400), generationSignal);
+                const fb = await executeFallbackGeneration(rag, generationSignal);
+                text = fb.text;
+                finishReason = fb.finishReason;
+                failure.buffered_text_chars = text.length;
+                if (text) {
+                  const firstText = performance.now();
+                  telemetry.ttft_ms = Math.round(firstText - reqStart);
+                  telemetry.model_first_text_ms = firstText - modelStart;
+                }
+              } catch (fallbackError) {
+                failure.generation_fallback_succeeded = false;
+                recordFailure('model_stream_finalization', fallbackError ?? terminalStreamError);
+                throw fallbackError;
+              }
+            }
           }
           const signal = AbortSignal.any([req.signal, streamAbort.signal]);
           text = await rag.prepareEnterpriseAnswer(text, finishReason, signal);
           await rag.finalizeAnswer(text, finishReason, signal);
+          failure.emitted_text_chars = text.length > emittedLength ? text.length : emittedLength;
           rag.recordFinalOutcome(text);
           const fallbackQuestions = await rag.fallbackQuestionsFor(text, signal);
           if (enterprise) send({ type: 'metadata', citations: rag.getCitations() });
